@@ -1,0 +1,94 @@
+variables:
+  version: 0.4
+  PSUM_DATAWIDTH: 16
+  INPUT_WEIGHT_DATAWIDTH: 16
+  global_cycle_seconds: 1e-09
+
+architecture:
+  version: 0.4
+  nodes:
+  - !Container # Top-level system
+    name: system
+    attributes:
+      global_cycle_seconds: 1e-09
+      technology: "45nm"
+  
+  - !Component # DRAM (SEDRAM)
+    name: DRAM
+    class: DRAM
+    attributes:
+      type: "LPDDR4"
+      width: 64
+      depth: 100000000
+      datawidth: 16
+
+  - !Container # Accelerator Wrapper
+    name: accelerator
+
+  - !Component # Global Buffer
+    name: shared_glb
+    class: smartbuffer_SRAM
+    attributes:
+      depth: 16384
+      width: 64
+      n_banks: 32
+      datawidth: 16
+      read_bandwidth: 16
+      write_bandwidth: 16
+    constraints:
+      dataspace: {keep: [Inputs, Outputs], bypass: [Weights]}
+
+  # [Relaxed Constraint] 移除 permutation，让 Mapper 自动决定空间映射
+  - !Container # PE Column
+    name: PE_column
+    spatial: {meshX: 16}
+    # 删除 constraints 部分，允许任意维度映射
+
+  # [Relaxed Constraint] 移除 permutation
+  - !Container # PE Row
+    name: PE
+    spatial: {meshY: 16}
+    # 删除 constraints 部分
+
+  # [Level 6] Register Files (Parallel Layer)
+  - !Parallel 
+    nodes:
+    - !Component # Input RF
+      name: ifmap_spad
+      class: smartbuffer_RF
+      attributes:
+        depth: 12
+        width: 16
+        datawidth: 16
+      constraints:
+        dataspace: {keep: [Inputs]}
+
+    - !Component # Weight RF
+      name: weights_spad
+      class: smartbuffer_RF
+      attributes:
+        depth: 192
+        width: 16
+        datawidth: 16
+      constraints:
+        dataspace: {keep: [Weights]}
+
+    - !Component # Output RF
+      name: psum_spad
+      class: smartbuffer_RF
+      attributes:
+        depth: 16
+        width: 16
+        update_fifo_depth: 2
+        datawidth: 16
+      constraints:
+        dataspace: {keep: [Outputs]}
+
+  # [Level 7] MAC Unit
+  - !Component 
+    name: mac
+    class: intmac
+    attributes:
+      multiplier_width: 16
+      adder_width: 16
+      datawidth: 16

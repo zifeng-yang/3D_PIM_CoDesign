@@ -1,0 +1,50 @@
+architecture:
+  version: 0.4
+  subtree:
+    - name: system
+      attributes:
+        technology: 28nm
+        global_cycle_seconds: 2.5e-09
+      local:
+        - name: DRAM
+          class: DRAM
+          attributes:
+            type: LPDDR4
+            width: 64
+            block-size: 64
+            word-bits: 16
+      subtree:
+        - name: PIM_Node
+          attributes:
+            technology: 28nm
+          local:
+            - name: SRAM_Buffer
+              class: SRAM
+              attributes:
+                technology: 28nm
+                width: 64
+                depth: 7228
+                word-bits: 16
+                meshX: 8
+          subtree:
+            - name: PE_Array
+              attributes:
+                meshX: 8
+                meshY: 10
+              local:
+                # [Fix] 添加 L0 寄存器堆 (Register File)
+                # 这是一个至关重要的层级，用于存放操作数 (Weights/Inputs/P-Sums)
+                - name: RegFile
+                  class: regfile  # 对应 components/regfile.yaml
+                  attributes:
+                    depth: 64     # 典型的 L0 大小
+                    width: 16
+                    technology: 28nm
+                    meshX: 8
+                
+                - name: MAC
+                  class: intmac
+                  attributes:
+                    datawidth: 16
+                    technology: 28nm
+                    meshX: 8

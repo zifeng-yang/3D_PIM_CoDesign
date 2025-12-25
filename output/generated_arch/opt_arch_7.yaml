@@ -1,0 +1,40 @@
+architecture:
+  version: 0.4
+  subtree:
+    - name: system
+      attributes:
+        technology: 28nm
+        # NicePIM: 400 MHz = 2.5 ns
+        global_cycle_seconds: 2.5e-09
+      local:
+        - name: DRAM
+          class: DRAM
+          attributes:
+            type: LPDDR4
+            width: 64
+            block-size: 64
+            word-bits: 16
+      subtree:
+        - name: PIM_Node
+          attributes:
+            technology: 28nm
+          local:
+            - name: SRAM_Buffer
+              class: SRAM
+              attributes:
+                technology: 28nm
+                width: 64
+                depth: 12030
+                word-bits: 16
+                meshX: 10
+          subtree:
+            - name: PE_Array
+              attributes:
+                meshX: 10
+                meshY: 6
+              local:
+                - name: MAC
+                  class: intmac
+                  attributes:
+                    datawidth: 16
+                    technology: 28nm
