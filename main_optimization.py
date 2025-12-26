@@ -1,144 +1,203 @@
+# 文件路径: main_optimization.py
+
 import os
 import csv
 import numpy as np
 import logging
-
-# 使用 skopt 进行贝叶斯优化
+import math
 from skopt import Optimizer
 from skopt.space import Integer
 
-# [Critical] 确保导入路径与你的 ls 结构一致
+# 导入自定义模块
 from modules.arch_gen import ArchGenerator
 from modules.wrapper_timeloop import TimeloopWrapper
 from modules.wrapper_ramulator import RamulatorWrapper
 from modules.trace_gen import TraceGenerator
 
-# === NicePIM 论文核心常数  ===
-# Section VIII.B: "energy cost of DRAM access is 0.88 pJ/bit"
-DRAM_ENERGY_PER_BIT = 0.88 
-# Section VIII.B: "data width of input... is 16-bit" -> 128-bit bank width
-DRAM_BANK_WIDTH = 128       
-
-# === 全局配置 ===
-N_CALLS = 15                
-N_RANDOM_STARTS = 5         
-OUTPUT_FILE = "dse_results_nicepim.csv" # 改名以区分旧数据
+# === 常量定义 ===
+DRAM_ENERGY_PER_BIT = 0.88  # pJ/bit
+DRAM_BANK_WIDTH = 128       # bits
+N_CALLS = 50                # 增加迭代次数以体现收敛性
+OUTPUT_FILE = "dse_results_turbo.csv"
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
-def run_nicepim_dse():
-    # 1. 定义设计空间 (Table IV in Paper) [cite: 566]
-    # PE Array: 1~256 total PEs. We optimize Dimensions X * Y.
-    # SRAM: 1KB ~ 2048KB.
-    space = [
-        Integer(4, 16, name='pe_x'),      # Constraints: 4x4 to 16x16
-        Integer(4, 16, name='pe_y'),
-        Integer(8192, 131072, name='sram_size') # 8KB - 128KB (Bytes)
+class TuRBOState:
+    """简化的信任域状态机 (Trust Region State Machine)"""
+    def __init__(self, dim, length_min=0.5, length_max=2.0, length_init=1.0):
+        self.dim = dim
+        self.length = length_init
+        self.length_min = length_min
+        self.length_max = length_max
+        self.failure_counter = 0
+        self.success_counter = 0
+        self.best_value = float('inf')
+        self.best_x = None
+        # TuRBO 超参数
+        self.succ_tol = 3  # 连续成功3次扩大
+        self.fail_tol = 5  # 连续失败5次缩小
+
+    def update(self, y, x):
+        if y < self.best_value:
+            self.best_value = y
+            self.best_x = x
+            self.success_counter += 1
+            self.failure_counter = 0
+        else:
+            self.success_counter = 0
+            self.failure_counter += 1
+
+        # 动态调整信任域半径 (Length)
+        if self.success_counter >= self.succ_tol:
+            self.length = min(self.length * 2.0, self.length_max)
+            self.success_counter = 0
+        elif self.failure_counter >= self.fail_tol:
+            self.length /= 2.0
+            self.failure_counter = 0
+        
+        # 重启机制：如果半径过小，通常需要重启 (这里简化为重置半径)
+        if self.length < self.length_min:
+            self.length = self.length_init
+
+    def get_trust_region_bounds(self, space):
+        """计算当前信任域的上下界"""
+        if self.best_x is None:
+            return space # 尚未找到最优解，搜索全域
+
+        bounds = []
+        for i, dim in enumerate(space):
+            low, high = dim.low, dim.high
+            range_ = high - low
+            
+            # 信任域半径 (归一化后)
+            tr_radius = self.length * range_ / 2.0
+            
+            center = self.best_x[i]
+            x_min = max(low, int(center - tr_radius))
+            x_max = min(high, int(center + tr_radius))
+            
+            # 确保 Integer 空间有效
+            if x_max < x_min: x_max = x_min
+            
+            bounds.append(Integer(x_min, x_max, name=dim.name))
+        return bounds
+
+def run_turbo_dse():
+    # 1. 定义完整设计空间 (Table IV)
+    full_space = [
+        Integer(2, 16, name='pe_x'),        # Dimension X
+        Integer(2, 16, name='pe_y'),        # Dimension Y
+        Integer(8192, 131072, name='sram_size') # Buffer Size (Bytes)
     ]
     
-    # 初始化优化器 (使用 Extra Trees 回归器，适合离散硬件空间)
-    opt = Optimizer(space, base_estimator="ET", acq_func="EI", 
-                    n_initial_points=N_RANDOM_STARTS, random_state=42)
+    # 初始化 TuRBO 状态
+    turbo = TuRBOState(dim=len(full_space))
     
     # 2. 初始化工具链
     cwd = os.getcwd()
-    
-    # [Updated] 指向新建的 templates 目录
-    hw_gen = ArchGenerator(
-        template_path=os.path.join(cwd, "templates/arch.yaml.jinja2"),
-        output_dir=os.path.join(cwd, "output/generated_arch")
-    )
-    
-    tl_wrapper = TimeloopWrapper(docker_image_name="timeloopaccelergy/timeloop-accelergy-pytorch:latest-amd64")
-    ram_wrapper = RamulatorWrapper(docker_image="ramulator-pim-test:latest")
+    hw_gen = ArchGenerator(template_path=os.path.join(cwd, "templates/arch.yaml.jinja2"),
+                           output_dir=os.path.join(cwd, "output/generated_arch"))
+    tl_wrapper = TimeloopWrapper()
+    ram_wrapper = RamulatorWrapper()
     trace_gen = TraceGenerator(os.path.join(cwd, "output/dram.trace"))
 
     # CSV Header
     if not os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Iteration", "PE_X", "PE_Y", "SRAM", "EDP", "Total_Energy", "Logic_Energy", "DRAM_Energy", "Cycles"])
+            csv.writer(f).writerow(["Iter", "Mode", "PE_X", "PE_Y", "SRAM", "EDP", "TR_Length", "Latency", "Energy"])
 
-    print("=== NicePIM Design Space Exploration Started ===")
-    print(f"Constraints: 28nm, 400MHz, 0.88pJ/bit DRAM")
+    print("=== Co-Design Started: TuRBO + Atomic Scheduling ===")
 
+    # 使用两个优化器实例：全局(热启动用) + 局部(信任域用)
+    # 这里为了代码简洁，我们每一轮动态创建受限的优化器
+    
     for i in range(N_CALLS):
-        # A. 获取参数
-        next_point = opt.ask()
+        # --- Step A: 确定当前的搜索空间 (Trust Region) ---
+        current_bounds = turbo.get_trust_region_bounds(full_space)
+        
+        # 临时优化器，用于在信任域内采样
+        # 注意：这里简化了逻辑，每次重新初始化以利用 bounds，
+        # 实际 TuRBO 会维护一个包含所有历史数据的全局模型
+        opt = Optimizer(current_bounds, base_estimator="ET", acq_func="EI", 
+                        n_initial_points=2 if i==0 else 1, random_state=42+i)
+        
+        try:
+            next_point = opt.ask()
+        except:
+            # 如果信任域太小导致采样失败，回退到全局采样
+            next_point = [np.random.randint(d.low, d.high+1) for d in full_space]
+
         pe_x, pe_y, sram_sz = next_point
         
-        print(f"\n--- Iteration {i+1}/{N_CALLS} ---")
-        print(f"Trying: PE={pe_x}x{pe_y}, SRAM={sram_sz} Bytes")
-
-        # B. 生成硬件 (注入论文默认参数)
-        design_params = {'pe_dim_x': pe_x, 'pe_dim_y': pe_y, 'sram_size': sram_sz}
-        arch_file = hw_gen.generate_config(design_params, filename=f"opt_arch_{i+1}.yaml")
+        # --- Step B: 切换调度模式 (Baseline vs Atomic) ---
+        # 为了对比，我们在偶数轮跑 Baseline，奇数轮跑 Proposed
+        # 实际论文数据建议分别跑两组完整的 DSE，这里为了演示合并在一起
+        mode = "baseline" if i % 2 == 0 else "atomic"
+        mapper_file = "mapper_baseline.yaml" if mode == "baseline" else "mapper_atomic.yaml"
         
-        # C. 运行 Timeloop (Logic Die Simulation)
-        stats_dir = os.path.join(cwd, f"output/step_{i+1}")
+        print(f"\n--- Iter {i+1} [{mode.upper()}] TR_Len={turbo.length:.2f} ---")
+        print(f"Config: {pe_x}x{pe_y}, {sram_sz//1024}KB")
+
+        # --- Step C: 仿真流程 ---
+        # 1. 生成硬件
+        arch_file = hw_gen.generate_config({'pe_dim_x': pe_x, 'pe_dim_y': pe_y, 'sram_size': sram_sz}, 
+                                           filename=f"arch_{i}.yaml")
+        
+        # 2. Timeloop 映射 (计算延迟与能耗)
+        stats_dir = os.path.join(cwd, f"output/step_{i}")
         tl_stats = tl_wrapper.run_mapper(
             arch_path=arch_file,
             prob_path=os.path.join(cwd, "configs/prob/cnn_layer.yaml"),
-            mapper_path=os.path.join(cwd, "configs/mapper/mapper.yaml"),
+            mapper_path=os.path.join(cwd, f"configs/mapper/{mapper_file}"), # 动态切换 Mapper
             output_dir=stats_dir
         )
         
-        edp = 1e25 # Penalty
-        logic_E = 0
-        dram_E = 0
-        sys_cycles = 0
-
+        # 3. 结果处理
+        edp = 1e15 # 默认惩罚值
+        latency = 0
+        energy = 0
+        
         if tl_stats:
-            tl_cycles = tl_stats['cycles']
-            logic_E = tl_stats['energy_pj'] # Accelergy: SRAM + MAC Energy
+            logic_cycle = tl_stats['cycles']
+            logic_energy = tl_stats['energy_pj']
             
-            # D. 运行 Ramulator (3D Memory Simulation)
-            # 1. 生成 NicePIM 风格的 Trace (Tile-based Access)
-            # 采样率 5% 以平衡速度
-            scale = 0.05
-            trace_path, num_reqs = trace_gen.generate_from_stats(tl_stats, scaling_factor=scale)
+            # 4. 生成 Trace (基于模式)
+            # 关键：atomic 模式下生成的 Trace 局部性更好
+            trace_path, num_reqs = trace_gen.generate_structured_trace(
+                tl_stats, mode=mode, output_path=f"output/dram_{i}.trace")
             
-            # 2. 仿真
-            ram_cycles_sampled = ram_wrapper.run_simulation(
+            # 5. Ramulator 仿真
+            ram_cycle = ram_wrapper.run_simulation(
                 config_rel_path="configs/ramulator/sedram.cfg",
-                trace_rel_path=f"output/dram.trace.0",
-                output_rel_dir=f"output/step_{i+1}"
+                trace_rel_path=f"output/dram_{i}.trace.0",
+                output_rel_dir=stats_dir
             )
             
-            if ram_cycles_sampled:
-                # 3. 还原真实周期
-                ram_cycles_total = int(ram_cycles_sampled * (1.0 / scale))
+            if ram_cycle:
+                # 6. 计算系统指标
+                total_cycle = max(logic_cycle, ram_cycle)
+                dram_energy = num_reqs * DRAM_BANK_WIDTH * DRAM_ENERGY_PER_BIT
+                total_energy = logic_energy + dram_energy
+                edp = total_cycle * total_energy
                 
-                # 4. [Core Logic] 计算真实 DRAM 能耗 (0.88 pJ/bit)
-                # Total Bits = Lines * 128-bit * (1/scale)
-                total_bits = num_reqs * DRAM_BANK_WIDTH * (1.0 / scale)
-                dram_E = total_bits * DRAM_ENERGY_PER_BIT
-                
-                # 5. 系统性能汇总
-                # Latency = max(Compute, Memory) (假设 PIM 流水线掩盖)
-                sys_cycles = max(tl_cycles, ram_cycles_total)
-                total_E = logic_E + dram_E
-                edp = total_E * sys_cycles
-                
-                print(f"  >> [Result] Logic E: {logic_E:.2e} pJ, DRAM E: {dram_E:.2e} pJ")
-                print(f"  >> [Result] Latency: {sys_cycles} (Compute: {tl_cycles}, Mem: {ram_cycles_total})")
-                print(f"  >> [Result] EDP: {edp:.2e}")
+                latency = total_cycle
+                energy = total_energy
+                print(f"  >> Success: EDP={edp:.2e} (L={logic_cycle}, M={ram_cycle})")
             else:
-                print("  >> [Fail] Ramulator simulation failed.")
+                print("  >> Ramulator Failed")
         else:
-            print("  >> [Fail] Timeloop mapping failed.")
+            print("  >> Timeloop Mapping Failed")
 
-        # E. 记录与反馈
-        opt.tell(next_point, edp)
+        # --- Step D: 更新 TuRBO 状态 ---
+        # 只有 Proposed 模式的数据用于更新硬件优化器 (协同进化的逻辑)
+        if mode == "atomic":
+            turbo.update(edp, next_point)
         
+        # 记录数据
         with open(OUTPUT_FILE, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([i+1, pe_x, pe_y, sram_sz, edp, logic_E + dram_E, logic_E, dram_E, sys_cycles])
+            csv.writer(f).writerow([i+1, mode, pe_x, pe_y, sram_sz, edp, turbo.length, latency, energy])
 
-    # 结束
-    best_idx = np.argmin(opt.yi)
-    print(f"\n=== Best Config Found: EDP = {opt.yi[best_idx]:.2e} ===")
-    print(f"Config: {opt.Xi[best_idx]}")
+    print(f"\nBest Config (Atomic): {turbo.best_x}, EDP: {turbo.best_value:.2e}")
 
 if __name__ == "__main__":
-    run_nicepim_dse()
+    run_turbo_dse()

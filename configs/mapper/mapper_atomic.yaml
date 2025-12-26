@@ -1,0 +1,21 @@
+mapper:
+  optimization-metrics: [ delay, energy ]
+  live-status: false
+  num-threads: 8
+  timeout: 1000
+  victory-condition: 0
+  algorithm: random-pruned
+
+mapspace:
+  constraints:
+    # [Constraint 1] SRAM_Buffer (原 GlobalBuffer)
+    # 强制利用 PE 阵列的空间并行性
+    - target: SRAM_Buffer  # <--- 必须与 arch.yaml 中的 name 一致
+      type: spatial
+      permutation: CM      # 优先展开 Channel 和 Map 维度
+      
+    # [Constraint 2] RegFile
+    # 强制 L0 寄存器做极致的数据复用 (Weight Stationary 风格)
+    - target: RegFile      # <--- 必须与 arch.yaml 中的 name 一致
+      type: temporal
+      factors: [ R=1, S=1 ]
