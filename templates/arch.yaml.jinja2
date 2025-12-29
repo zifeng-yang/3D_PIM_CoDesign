@@ -1,0 +1,89 @@
+architecture:
+  version: 0.4
+  
+  nodes:
+    # ---------------------------------------------------------------------------
+    # Level 0: System (Off-chip / Stacked Memory)
+    # ---------------------------------------------------------------------------
+    - !Container
+      name: system
+      attributes:
+        technology: "{{ TECHNOLOGY }}"
+        global_cycle_seconds: {{ GLOBAL_CYCLE_SECONDS }}
+    
+    # 全局 DRAM
+    - !Component
+      name: DRAM
+      class: DRAM
+      attributes:
+        technology: "{{ TECHNOLOGY }}"
+        type: "LPDDR4"
+        width: 256
+        datawidth: {{ WORD_BITS }}
+        depth: 67108864 
+        block_size: 16
+        word_bits: {{ WORD_BITS }}
+
+    # ---------------------------------------------------------------------------
+    # Level 1: PIM Nodes (Inter-Node Parallelism)
+    # ---------------------------------------------------------------------------
+    - !Hierarchical
+      nodes:
+        - !Container
+          name: PIM_Node
+          attributes:
+            technology: "{{ TECHNOLOGY }}"
+            meshX: {{ NUM_NODES }} # For Accelergy
+          spatial:
+            meshX: {{ NUM_NODES }} # [Fix] For Timeloop Mapping
+        
+        # 每个节点独占的 SRAM Buffer
+        - !Component
+          name: Node_SRAM
+          class: SRAM
+          attributes:
+            technology: "{{ TECHNOLOGY }}"
+            width: {{ SRAM_WIDTH }}
+            depth: {{ SRAM_DEPTH }}
+            datawidth: {{ WORD_BITS }}
+            word_bits: {{ WORD_BITS }}
+            meshX: {{ NUM_NODES }} 
+          spatial:
+            meshX: 1 
+
+        # ---------------------------------------------------------------------
+        # Level 2: PE Array (Intra-Node Parallelism)
+        # ---------------------------------------------------------------------
+        - !Hierarchical
+          nodes:
+            - !Container
+              name: PE_Array
+              attributes:
+                technology: "{{ TECHNOLOGY }}"
+                meshX: {{ NUM_NODES }} 
+              spatial:
+                meshX: {{ PE_DIM_X }}
+                meshY: {{ PE_DIM_Y }}
+            
+            # Registers
+            - !Component
+              name: RegFile
+              class: regfile
+              attributes:
+                technology: "{{ TECHNOLOGY }}"
+                width: {{ WORD_BITS }}
+                depth: 64
+                datawidth: {{ WORD_BITS }}
+                word_bits: {{ WORD_BITS }}
+                meshX: {{ NUM_NODES * PE_DIM_X * PE_DIM_Y }} # [Fix] Count Calculation
+            
+            # Compute Unit
+            - !Component
+              name: MAC
+              class: "{{ MAC_CLASS }}"
+              attributes:
+                technology: "{{ TECHNOLOGY }}"
+                datawidth: {{ WORD_BITS }}
+                multiplier_width: 8
+                adder_width: 16
+                meshX: {{ NUM_NODES * PE_DIM_X * PE_DIM_Y }} # [Fix] Count Calculation
