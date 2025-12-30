@@ -1,18 +1,15 @@
 architecture:
   version: 0.4
-<<<<<<< HEAD
   
   nodes:
-    # ---------------------------------------------------------------------------
-    # Level 0: System (Off-chip / Stacked Memory)
-    # ---------------------------------------------------------------------------
+    # --- Level 0: System Attributes ---
     - !Container
       name: system
       attributes:
         technology: "{{ TECHNOLOGY }}"
         global_cycle_seconds: {{ GLOBAL_CYCLE_SECONDS }}
-    
-    # 全局 DRAM
+
+    # --- Level 3: Off-chip Memory (DRAM) ---
     - !Component
       name: DRAM
       class: DRAM
@@ -24,21 +21,20 @@ architecture:
         depth: 67108864 
         block_size: 16
         word_bits: {{ WORD_BITS }}
+        meshX: 1
 
-    # ---------------------------------------------------------------------------
-    # Level 1: PIM Nodes (Inter-Node Parallelism)
-    # ---------------------------------------------------------------------------
+    # --- Level 2: PIM Nodes (Parallel Vaults) ---
     - !Hierarchical
       nodes:
         - !Container
           name: PIM_Node
           attributes:
             technology: "{{ TECHNOLOGY }}"
-            meshX: {{ NUM_NODES }} # For Accelergy
+            meshX: {{ NUM_NODES }} 
           spatial:
-            meshX: {{ NUM_NODES }} # [Fix] For Timeloop Mapping
-        
-        # 每个节点独占的 SRAM Buffer
+            meshX: {{ NUM_NODES }} 
+
+        # Level 1.5: Node-local SRAM (必须叫 Node_SRAM)
         - !Component
           name: Node_SRAM
           class: SRAM
@@ -52,9 +48,7 @@ architecture:
           spatial:
             meshX: 1 
 
-        # ---------------------------------------------------------------------
-        # Level 2: PE Array (Intra-Node Parallelism)
-        # ---------------------------------------------------------------------
+        # --- Level 1: PE Array ---
         - !Hierarchical
           nodes:
             - !Container
@@ -66,7 +60,7 @@ architecture:
                 meshX: {{ PE_DIM_X }}
                 meshY: {{ PE_DIM_Y }}
             
-            # Registers
+            # Level 0.5: Registers
             - !Component
               name: RegFile
               class: regfile
@@ -76,9 +70,9 @@ architecture:
                 depth: 64
                 datawidth: {{ WORD_BITS }}
                 word_bits: {{ WORD_BITS }}
-                meshX: {{ NUM_NODES * PE_DIM_X * PE_DIM_Y }} # [Fix] Count Calculation
+                meshX: {{ NUM_NODES * PE_DIM_X * PE_DIM_Y }} 
             
-            # Compute Unit
+            # Level 0: MAC Units
             - !Component
               name: MAC
               class: "{{ MAC_CLASS }}"
@@ -87,54 +81,4 @@ architecture:
                 datawidth: {{ WORD_BITS }}
                 multiplier_width: 8
                 adder_width: 16
-                meshX: {{ NUM_NODES * PE_DIM_X * PE_DIM_Y }} # [Fix] Count Calculation
-=======
-  subtree:
-    - name: system
-      attributes:
-        technology: {{ TECHNOLOGY }}
-        global_cycle_seconds: {{ GLOBAL_CYCLE_SECONDS }}
-      local:
-        - name: DRAM
-          class: DRAM
-          attributes:
-            type: LPDDR4
-            width: {{ DRAM_WIDTH }}
-            block-size: {{ DRAM_WIDTH }}
-            word-bits: {{ WORD_BITS }}
-      subtree:
-        - name: PIM_Node
-          attributes:
-            technology: {{ TECHNOLOGY }}
-          local:
-            - name: SRAM_Buffer
-              class: SRAM
-              attributes:
-                technology: {{ TECHNOLOGY }}
-                width: {{ SRAM_WIDTH }}
-                depth: {{ SRAM_DEPTH }}
-                word-bits: {{ WORD_BITS }}
-                meshX: {{ PE_DIM_X }}
-          subtree:
-            - name: PE_Array
-              attributes:
-                meshX: {{ PE_DIM_X }}
-                meshY: {{ PE_DIM_Y }}
-              local:
-                # [Fix] 添加 L0 寄存器堆 (Register File)
-                # 这是一个至关重要的层级，用于存放操作数 (Weights/Inputs/P-Sums)
-                - name: RegFile
-                  class: regfile  # 对应 components/regfile.yaml
-                  attributes:
-                    depth: 64     # 典型的 L0 大小
-                    width: {{ WORD_BITS }}
-                    technology: {{ TECHNOLOGY }}
-                    meshX: {{ PE_DIM_X }}
-                
-                - name: MAC
-                  class: {{ MAC_CLASS }}
-                  attributes:
-                    datawidth: {{ WORD_BITS }}
-                    technology: {{ TECHNOLOGY }}
-                    meshX: {{ PE_DIM_X }}
->>>>>>> d2ec8543f2de6810717e0b3d892adc03f09692e8
+                meshX: {{ NUM_NODES * PE_DIM_X * PE_DIM_Y }}
