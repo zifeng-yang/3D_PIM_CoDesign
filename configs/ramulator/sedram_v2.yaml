@@ -1,0 +1,32 @@
+Frontend:
+  impl: LoadStoreTrace
+  clock_ratio: 1
+  num_expected_insts: 100000000
+  path: output/dram.trace
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: LPDDR5
+    org:
+      preset: LPDDR5_8Gb_x16
+      channel: 8
+      rank: 1
+    timing:
+      preset: LPDDR5_6400
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      impl: ClosedRowPolicy
+      cap: 4
+    plugins: []          
+
+  AddrMapper:
+    impl: RoBaRaCoCh

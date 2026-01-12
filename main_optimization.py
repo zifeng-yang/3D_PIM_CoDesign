@@ -17,23 +17,70 @@ from modules.wrapper_ramulator import RamulatorWrapper
 from modules.trace_gen import TraceGenerator
 from modules.result_parser import TimeloopParser
 
-# === 全局配置 (High Precision) ===
-DRAM_ENERGY_PER_BIT = 1.0   # pJ/bit
+# === 全局配置 ===
 DRAM_BANK_WIDTH = 256       # bits
-NOC_ENERGY_PER_BIT = 0.5    # pJ/bit (Python 侧手动补偿)
 N_CALLS = 50                # 迭代次数
 OUTPUT_FILE = "dse_results_nicepim.csv"
-AREA_LIMIT_MM2 = 48.0       # Area Budget
+AREA_LIMIT_MM2 = 48.0       # Area Budget (mm^2)
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
+def generate_booksim_config(output_path, num_nodes):
+    """
+    根据节点数量动态生成 BookSim 配置文件 (Mesh拓扑)
+    """
+    # 动态计算拓扑维度 k (例如 4个节点 -> 2x2 Mesh)
+    k = int(math.ceil(math.sqrt(num_nodes)))
+    if k < 2: k = 2
+    
+    # 使用 f-string 生成配置内容
+    # 注意：配置中的注释使用 // (BookSim语法)
+    config_content = f"""
+// Auto-generated BookSim Config for {num_nodes} nodes
+topology = mesh;
+k = {k};
+n = 2;
+routing_function = dim_order;
+
+// 流量模型 (会被 Wrapper 根据真实 Trace 覆盖注入率)
+traffic = uniform;
+packet_size = 1;
+injection_rate = 0.01; 
+
+// 仿真控制 (会被 Wrapper 根据真实 Ramulator 周期覆盖 sim_count)
+sim_type = latency;
+warmup_periods = 0;
+sim_count = 1000; 
+
+// [关键修复] 关闭读写分离模式，避免 VC 分配导致的 Assertion Failed
+use_read_write = 0;
+
+// VC 配置
+num_vcs = 4;
+vc_buf_size = 4;
+wait_for_tail_credit = 1;
+"""
+    
+    # 写入文件
+    with open(output_path, 'w') as f:
+        f.write(config_content)
+    
+    return output_path
+
+# DRAM 静态能耗估算
+def calc_dram_background_energy(simulation_time_ns):
+    p_static_mw = 11.0 
+    e_static = p_static_mw * simulation_time_ns 
+    return e_static
+
+# 贝叶斯优化状态管理 (TuRBO 算法简化版)
 class TuRBOState:
-    """信任域贝叶斯优化状态机"""
     def __init__(self, dim, length_min=0.5, length_max=2.0, length_init=1.0):
         self.dim = dim
         self.length = length_init
         self.length_min = length_min
         self.length_max = length_max
+        self.length_init = length_init 
         self.failure_counter = 0
         self.success_counter = 0
         self.best_value = float('inf')
@@ -75,24 +122,14 @@ class TuRBOState:
         return bounds
 
 def generate_dynamic_mapper(template_path, output_path, num_nodes, mode):
-    """根据硬件规模动态生成 Mapper 约束"""
-    if not os.path.exists(template_path):
-        print(f"  [Warning] Mapper template {template_path} not found.")
-        return False
+    if not os.path.exists(template_path): return False
+    with open(template_path, 'r') as f: config = yaml.safe_load(f)
 
-    with open(template_path, 'r') as f:
-        config = yaml.safe_load(f)
+    if 'mapspace' not in config: config['mapspace'] = {'template': 'uber', 'version': 0.4}
+    if 'constraints' not in config: config['constraints'] = {'version': 0.4, 'targets': []}
+    elif 'targets' not in config['constraints']: config['constraints']['targets'] = []
 
-    if 'mapspace' not in config: 
-        config['mapspace'] = {'template': 'uber', 'version': 0.4}
-    if 'constraints' not in config: 
-        config['constraints'] = {'version': 0.4, 'targets': []}
-    elif 'targets' not in config['constraints']:
-        config['constraints']['targets'] = []
-
-    # === 策略注入 ===
     if mode == "atomic":
-        # Atomic 策略：强制在 PIM_Node 维度进行空间切分
         spatial_constraint = {
             'target': 'PIM_Node',
             'type': 'spatial',
@@ -101,23 +138,28 @@ def generate_dynamic_mapper(template_path, output_path, num_nodes, mode):
         }
         config['constraints']['targets'].append(spatial_constraint)
     
-    with open(output_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
+    with open(output_path, 'w') as f: yaml.dump(config, f, default_flow_style=False)
     return True
 
 def run_turbo_dse():
+    # 搜索空间定义
     full_space = [
-        Integer(1, 16, name='num_nodes'),
-        Integer(4, 32, name='pe_dim'),
-        Integer(65536, 1048576, name='sram_size') 
+        Integer(1, 16, name='num_nodes'),          # PIM 节点数量
+        Integer(4, 32, name='pe_dim'),             # PE 阵列维度
+        Integer(1048576, 33554432, name='sram_size') # SRAM 大小 (Bytes)
     ]
     
     turbo = TuRBOState(dim=len(full_space))
     cwd = os.getcwd()
+    
+    # 初始化各模块
     hw_gen = ArchGenerator(template_path=os.path.join(cwd, "templates/arch.yaml.jinja2"),
                            output_dir=os.path.join(cwd, "output/generated_arch"))
     tl_wrapper = TimeloopWrapper()
+    
+    # 初始化 RamulatorWrapper (注意：现在它负责调用本地二进制文件)
     ram_wrapper = RamulatorWrapper()
+    
     trace_gen = TraceGenerator(os.path.join(cwd, "output/dram.trace"))
     
     comp_dir = os.path.join(cwd, "configs/arch/components")
@@ -125,18 +167,19 @@ def run_turbo_dse():
         print(f"[Error] Component dir not found: {comp_dir}")
         return
 
+    # 初始化结果文件
     if not os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, 'w', newline='') as f:
             csv.writer(f).writerow(["Iter", "Mode", "Nodes", "PE_Dim", "SRAM", "EDP", "Latency", "Energy", "Area_mm2", "Runtime_s"])
 
     start_time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"=== NicePIM Co-Design Engine (Clean Mode) Started at {start_time_str} ===")
+    print(f"=== NicePIM Co-Design Engine (BookSim Integrated) Started at {start_time_str} ===")
     global_start = time.time()
 
     for i in range(N_CALLS):
         iter_start = time.time()
-
-        # TuRBO 采样
+        
+        # 1. 采样 (TuRBO)
         current_bounds = turbo.get_trust_region_bounds(full_space)
         opt = Optimizer(current_bounds, base_estimator="ET", acq_func="EI", 
                         n_initial_points=2 if i==0 else 1, random_state=42+i)
@@ -146,6 +189,7 @@ def run_turbo_dse():
             next_point = [np.random.randint(d.low, d.high+1) for d in full_space]
 
         num_nodes, pe_dim, sram_sz = next_point
+        # 交替运行 Baseline 和 Atomic 模式
         mode = "baseline" if i % 2 == 0 else "atomic"
         
         print(f"\n--- Iter {i+1} [{mode.upper()}] Nodes={num_nodes}, PE={pe_dim}x{pe_dim}, SRAM={sram_sz//1024}KB ---")
@@ -153,7 +197,7 @@ def run_turbo_dse():
         stats_dir = os.path.join(cwd, f"output/step_{i}")
         if not os.path.exists(stats_dir): os.makedirs(stats_dir)
 
-        # 1. 硬件生成
+        # 2. 生成硬件配置
         sram_depth = sram_sz // 8 
         arch_file = hw_gen.generate_config({
             'NUM_NODES': num_nodes,
@@ -163,14 +207,14 @@ def run_turbo_dse():
             'SRAM_WIDTH': 64
         }, filename=f"arch_{i}.yaml")
         
-        # 2. 映射器生成
+        # 3. 生成映射约束
         base_mapper_path = os.path.join(cwd, f"configs/mapper/mapper_{mode}.yaml")
         if not os.path.exists(base_mapper_path):
             base_mapper_path = os.path.join(cwd, "configs/mapper/mapper.yaml")
         iter_mapper_path = os.path.join(stats_dir, "mapper_generated.yaml")
         generate_dynamic_mapper(base_mapper_path, iter_mapper_path, num_nodes, mode)
 
-        # 3. 运行 Timeloop
+        # 4. 运行 Timeloop (Docker)
         t0 = time.time()
         is_success = tl_wrapper.run_mapper(
             arch_path=arch_file,
@@ -181,13 +225,14 @@ def run_turbo_dse():
         )
         t_timeloop = time.time() - t0
         
+        # 初始化结果
         edp = 1e16
         latency = 0
         energy = 0
         area_mm2 = 0.0
         
         if is_success:
-            # 4. 解析结果
+            # 5. 解析 Timeloop 结果
             stats_file = os.path.join(stats_dir, "timeloop-mapper.stats.txt")
             parser = TimeloopParser(stats_file)
             results = parser.parse()
@@ -195,18 +240,19 @@ def run_turbo_dse():
             logic_cycle = results.get('cycles', 0)
             logic_energy = results.get('energy_pj', 0)
             area_mm2 = results.get('area_mm2', 0.0)
-            
-            # [诊断]
             dram_r = results.get('dram_reads', 0)
             sram_r = results.get('sram_reads', 0)
-            print(f"  >> [Stats] Area={area_mm2:.2f}mm2, Cycle={logic_cycle}")
-            print(f"  >> [Diag] DRAM Reads: {dram_r:,} | SRAM Reads: {sram_r:,}")
 
+            print(f"  >> [Logic] Cycles: {logic_cycle:,} | Energy: {logic_energy:.2e} pJ | Area: {area_mm2:.2f} mm2")
+            reuse_ratio = sram_r / dram_r if dram_r > 0 else 0
+            print(f"  >> [Mem]   DRAM Acc: {dram_r:,} | SRAM Acc: {sram_r:,} | Reuse: {reuse_ratio:.1f}x")
+
+            # 面积约束检查
             if area_mm2 > AREA_LIMIT_MM2:
-                print(f"  [Constraint] Area > {AREA_LIMIT_MM2}. Penalty.")
+                print(f"  [Constraint] Area {area_mm2:.2f} > {AREA_LIMIT_MM2}. Penalty applied.")
                 edp = 1e17
             elif logic_cycle > 0:
-                # 6. 生成 Trace
+                # 6. 生成访存 Trace
                 trace_path, num_reqs = trace_gen.generate_structured_trace(
                     results, 
                     mode=mode, 
@@ -214,39 +260,62 @@ def run_turbo_dse():
                     stats_path=stats_file
                 )
                 
-                # 7. 运行 Ramulator
+                # 7. 联合仿真 (Ramulator + BookSim)
                 t1 = time.time()
-                ram_cycle = 0
-                if num_reqs > 0:
-                    ram_cycle = ram_wrapper.run_simulation(
-                        config_rel_path="configs/ramulator/sedram.cfg",
-                        trace_rel_path=f"output/dram_{i}.trace",
-                        output_rel_dir=stats_dir
-                    )
-                t_ramulator = time.time() - t1
-
-                # 8. 汇总
-                if mode == "atomic":
-                    total_cycle = max(logic_cycle, ram_cycle) * 1.10
-                else:
-                    total_cycle = logic_cycle + (ram_cycle * 0.85)
                 
-                dram_energy = num_reqs * DRAM_BANK_WIDTH * DRAM_ENERGY_PER_BIT
-                noc_energy = num_reqs * DRAM_BANK_WIDTH * NOC_ENERGY_PER_BIT
-                total_energy = logic_energy + dram_energy + noc_energy
+                # 生成 BookSim 初始配置
+                noc_cfg_path = os.path.join(stats_dir, "noc_config.cfg")
+                generate_booksim_config(noc_cfg_path, num_nodes)
+
+                # 调用 Wrapper (本地执行)
+                # Wrapper 会先跑 Ramulator 得到真实周期，再用该周期驱动 BookSim
+                sim_results = ram_wrapper.run_simulation(
+                    config_rel_path="configs/ramulator/LPDDR4-config.cfg",
+                    trace_rel_path=f"output/dram_{i}.trace",
+                    output_rel_dir=stats_dir,
+                    network_config_path=noc_cfg_path,
+                    num_nodes=num_nodes 
+                )
+                t_ramulator = time.time() - t1
+                
+                ram_cycle = sim_results['ram_cycles']
+                noc_energy = sim_results['noc_energy']
+                noc_avg_lat = sim_results['avg_network_latency']
+
+                # 8. 性能与能耗汇总 (数据驱动)
+                if mode == "atomic":
+                    # PIM 模式: 计算与访存/网络高度重叠
+                    # 总延迟 = max(逻辑计算, 访存 + 网络开销)
+                    # 粗略估算网络总开销 = 平均单包延迟 * 总包数 / 并行度
+                    noc_total_latency_penalty = int(noc_avg_lat * num_reqs / num_nodes)
+                    total_cycle = max(logic_cycle, ram_cycle + noc_total_latency_penalty)
+                else:
+                    # Baseline 模式: 串行阻塞
+                    noc_total_latency_penalty = int(noc_avg_lat * num_reqs / num_nodes)
+                    total_cycle = logic_cycle + ram_cycle + noc_total_latency_penalty
+                
+                # 计算 DRAM 动态和静态能耗
+                dram_dynamic = num_reqs * DRAM_BANK_WIDTH * 1.2
+                dram_static = calc_dram_background_energy(total_cycle * 1.0) 
+                
+                # 总能耗 = 逻辑 + DRAM(动+静) + NoC(BookSim真实值)
+                total_energy = logic_energy + dram_dynamic + dram_static + noc_energy
                 
                 edp = total_cycle * total_energy
                 latency = total_cycle
                 energy = total_energy
                 
-                print(f"  >> [Success] EDP={edp:.2e} (Lat: {latency:.0f}, En: {energy:.2e})")
+                print(f"  >> [NoC]   Energy: {noc_energy:.2e} pJ | Avg Lat: {noc_avg_lat:.1f} cycles")
+                print(f"  >> [Total] EDP: {edp:.2e} | Lat: {latency:.2e} | En: {energy:.2e}")
         
+        # 9. 更新优化器
         if mode == "atomic":
             turbo.update(edp, next_point)
         
         iter_end = time.time()
-        print(f"  >> [Timer] Total Iteration: {iter_end - iter_start:.2f}s")
+        print(f"  >> [Timer] Iteration finished in {iter_end - iter_start:.2f}s")
         
+        # 10. 记录结果
         with open(OUTPUT_FILE, 'a', newline='') as f:
             csv.writer(f).writerow([i+1, mode, num_nodes, pe_dim, sram_sz, edp, latency, energy, area_mm2, f"{iter_end - iter_start:.2f}"])
 

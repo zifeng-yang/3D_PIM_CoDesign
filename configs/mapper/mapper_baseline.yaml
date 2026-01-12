@@ -6,7 +6,7 @@ mapper:
   timeout: 10000
   victory_condition: 100
   algorithm: hybrid
-  diagnostics: false 
+  diagnostics: true 
 
 mapspace:
   template: uber

@@ -1,69 +1,132 @@
 import subprocess
 import os
+import re
 
 class RamulatorWrapper:
-    def __init__(self, docker_image="ramulator-pim-test:latest"):
-        self.image = docker_image
+    def __init__(self):
         self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        # 请确认此路径正确
+        self.ramulator_bin = "/home/yangzifeng/ramulator/ramulator"
+        self.booksim_bin   = "/home/yangzifeng/ramulator-pim/workspace/ramulator-pim/booksim2/src/booksim"
 
-    def run_simulation(self, config_rel_path, trace_rel_path, output_rel_dir):
-        work_dir = "/home/workspace"
-        
-        # 处理路径：传入不带 .0 的基础名
-        if trace_rel_path.endswith(".0"):
-            trace_base_arg = trace_rel_path[:-2]
-        else:
-            trace_base_arg = trace_rel_path
-
-        c_cfg = f"{work_dir}/{config_rel_path}"
-        c_trace = f"{work_dir}/{trace_base_arg}"
-        c_stats = f"{work_dir}/{output_rel_dir}/ramulator.stats"
-        ramulator_bin = "/ramulator-pim/ramulator/ramulator"
-        
-        # [CRITICAL UPDATE]
-        # 1. trace-format 改为 zsim
-        # 2. split-trace 改为 true (这样它会自动找 trace_base_arg + ".0")
-        cmd = (
-            f"docker run --rm -v {self.project_root}:{work_dir} "
-            f"-w {work_dir} {self.image} "
-            f"{ramulator_bin} "
-            f"--config {c_cfg} "
-            f"--disable-perf-scheduling true "
-            f"--mode=cpu "
-            f"--stats {c_stats} "
-            f"--trace {c_trace} "
-            f"--core-org=inOrder "
-            f"--number-cores=1 "
-            f"--trace-format=zsim "  # <--- 改为 zsim
-            f"--split-trace=true"    # <--- 改为 true
-        )
-        
-        try:
-            # 运行仿真
-            subprocess.run(cmd, shell=True, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # 解析结果
-            stats_file_host = os.path.join(self.project_root, output_rel_dir, "ramulator.stats")
-            return self.parse_cycles(stats_file_host)
-            
-        except Exception as e:
-            print(f"[Wrapper Error] {e}")
-            return 1000 # 失败时的保底值
-
-    def parse_cycles(self, stats_file):
+    def _parse_ramulator1_stats(self, stats_file):
+        """解析 Ramulator 1.0 的统计文件 (从 stdout 重定向而来)"""
+        cycles = 0
         if not os.path.exists(stats_file):
-            return 1000
+            print(f"[DEBUG-RAM] Stats file not found: {stats_file}")
+            return 0
+            
+        with open(stats_file, 'r') as f:
+            for line in f:
+                # 查找关键统计项
+                if "ramulator.dram_cycles" in line:
+                    parts = line.split()
+                    if len(parts) > 1:
+                        try:
+                            cycles = int(parts[1])
+                        except ValueError:
+                            pass
+                        break
+        
+        print(f"[DEBUG-RAM] Parsed Cycles: {cycles}")
+        return cycles
+
+    def _parse_booksim_output(self, output_text):
+        noc_power = 0.0
+        avg_latency = 0.0
+        lat_match = re.search(r'average packet latency\s*=\s*([\d\.]+)', output_text)
+        if lat_match: avg_latency = float(lat_match.group(1))
+        power_match = re.search(r'Total Power\s*=\s*([\d\.]+)', output_text)
+        if power_match: noc_power = float(power_match.group(1)) * 1000.0
+        return noc_power, avg_latency
+
+    def _update_booksim_config(self, cfg_path, injection_rate, sim_cycles):
+        if not os.path.exists(cfg_path): return
+        with open(cfg_path, 'r') as f: lines = f.readlines()
+        new_lines = []
+        has_inj = False
+        has_sim = False
+        for line in lines:
+            if "injection_rate" in line:
+                new_lines.append(f"injection_rate = {injection_rate:.6f};\n")
+                has_inj = True
+            elif "sim_count" in line:
+                new_lines.append(f"sim_count = {int(sim_cycles)};\n")
+                has_sim = True
+            else:
+                new_lines.append(line)
+        if not has_inj: new_lines.append(f"injection_rate = {injection_rate:.6f};\n")
+        if not has_sim: new_lines.append(f"sim_count = {int(sim_cycles)};\n")
+        with open(cfg_path, 'w') as f: f.writelines(new_lines)
+
+    def run_simulation(self, config_rel_path, trace_rel_path, output_rel_dir, network_config_path=None, num_nodes=1):
+        print(f"\n--- [Ramulator 1.0 Wrapper] Start Simulation ---")
+        
+        abs_config = os.path.join(self.project_root, config_rel_path)
+        base_trace_path = os.path.join(self.project_root, trace_rel_path)
+        
+        # 定义输出统计文件路径
+        trace_basename = os.path.basename(base_trace_path)
+        stats_filename = trace_basename + ".stats"
+        abs_stats_path = os.path.join(self.project_root, output_rel_dir, stats_filename)
+
+        # [修正] Ramulator 1.0 标准命令行格式:
+        # ./ramulator <config_file> --mode=cpu <trace_file>
+        cmd_ram = [
+            self.ramulator_bin,
+            abs_config,      # 第一个参数必须是配置文件
+            "--mode=cpu",
+            base_trace_path  # 最后一个参数是 Trace 文件
+        ]
+
+        ram_cycles = 0
         try:
-            with open(stats_file, 'r') as f:
-                for line in f:
-                    # 优先找 dram_cycles
-                    if "ramulator.dram_cycles" in line:
-                        val = int(line.split()[1])
-                        return val if val > 0 else 1000
-                    # 备选 cpu_cycles
-                    if "ramulator.cpu_cycles" in line:
-                        val = int(line.split()[1])
-                        return val if val > 0 else 1000
-            return 1000
-        except Exception:
-            return 1000
+            print(f"[DEBUG-RAM] Executing: {' '.join(cmd_ram)}")
+            
+            # 打开文件用于保存 stdout
+            with open(abs_stats_path, 'w') as f_out:
+                # 执行命令，将 stdout 重定向到文件
+                subprocess.run(cmd_ram, check=True, stdout=f_out, stderr=subprocess.PIPE, text=True)
+            
+            # 解析刚才生成的 stats 文件
+            ram_cycles = self._parse_ramulator1_stats(abs_stats_path)
+            
+        except subprocess.CalledProcessError as e:
+            print(f"[DEBUG-RAM] CRASHED with return code {e.returncode}")
+            print(f"Stderr: {e.stderr}")
+            return {'ram_cycles': 0, 'noc_energy': 0.0, 'avg_network_latency': 0.0}
+
+        # BookSim 部分 (保持不变)
+        noc_energy = 0.0
+        avg_network_latency = 0.0
+
+        if network_config_path and ram_cycles > 0:
+            abs_net_cfg = os.path.join(self.project_root, network_config_path)
+            
+            req_count = 0
+            if os.path.exists(base_trace_path):
+                with open(base_trace_path, 'r') as f:
+                    req_count = sum(1 for line in f if line.strip())
+            
+            real_inj = float(req_count) / float(ram_cycles * num_nodes) if num_nodes > 0 else 0.01
+            if real_inj > 0.95: real_inj = 0.95
+            if real_inj < 0.0001: real_inj = 0.0001
+            
+            self._update_booksim_config(abs_net_cfg, injection_rate=real_inj, sim_cycles=ram_cycles)
+            
+            cmd_book = [self.booksim_bin, abs_net_cfg]
+            try:
+                result = subprocess.run(cmd_book, capture_output=True, text=True)
+                if result.returncode == 0:
+                    power, lat = self._parse_booksim_output(result.stdout)
+                    noc_energy = power * ram_cycles
+                    avg_network_latency = lat
+                    print(f"[DEBUG-BOOK] Power:{power}, Lat:{lat}, Cycles:{ram_cycles}")
+            except Exception as e:
+                print(f"[DEBUG-BOOK] Exception: {e}")
+
+        return {
+            'ram_cycles': ram_cycles,
+            'noc_energy': noc_energy,
+            'avg_network_latency': avg_network_latency
+        }
