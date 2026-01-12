@@ -8,12 +8,12 @@ class TraceGenerator:
 
     def generate_structured_trace(self, timeloop_results, mode="baseline", output_path=None, stats_path=None):
         """
-        [Ramulator 1.0 兼容修正版]
-        修正问题: 解决 std::invalid_argument: stoul 崩溃
+        [Ramulator 1.0 标准兼容版]
+        生成标准的 Memory Trace，用于 --mode=dram 模式。
         
-        格式: <BubbleCount> <Address>
-        说明: Ramulator 1.0 在 cache=no 模式下不接受 'R'/'W' 字符。
-              此格式将所有请求视为 READ，但这对于带宽和延迟评估通常已经足够。
+        格式: <HexAddress> <R/W>
+        示例: 0x12345680 R
+        说明: 这是 Ramulator 官方推荐的内存 Trace 格式，避免了 CPU 模式下的解析歧义。
         """
         if output_path:
             self.output_path = output_path
@@ -22,9 +22,11 @@ class TraceGenerator:
         dram_reads = timeloop_results.get('dram_reads', 0)
         dram_writes = timeloop_results.get('dram_writes', 0)
         
+        # 兜底逻辑：如果没有访存，生成少量请求以防止仿真器报错或除零错误
         if dram_reads + dram_writes == 0:
             dram_reads = 100
 
+        # 缩放 Trace 大小，防止仿真时间过长
         MAX_TRACE_LINES = 100000 
         total_accesses = dram_reads + dram_writes
         scale_factor = 1.0
@@ -40,22 +42,24 @@ class TraceGenerator:
         max_addr = 0x80000000 # 2GB
         current_addr = base_addr
         
-        # 生成读请求
+        # 生成读请求 (R)
         for _ in range(scaled_reads):
-            # 格式: 气泡数 地址
-            lines.append(f"0 {hex(current_addr)}\n")
+            lines.append(f"{hex(current_addr)} R\n")
+            # 简单的地址跳跃模拟，增加随机性
             current_addr = (current_addr + stride) % max_addr
             if random.random() < 0.05: current_addr = (current_addr + 0x10000) % max_addr
             
-        # 生成写请求 (注意：Ramulator 1.0 cache=no 模式下会将其视为读，但这不影响能否跑通)
+        # 生成写请求 (W)
         for _ in range(scaled_writes):
-            lines.append(f"0 {hex(current_addr)}\n")
+            lines.append(f"{hex(current_addr)} W\n")
             current_addr = (current_addr + stride) % max_addr
             if random.random() < 0.05: current_addr = (current_addr + 0x10000) % max_addr
             
+        # 打乱读写顺序，模拟真实混合访问
         random.shuffle(lines)
         
         with open(self.output_path, 'w') as f:
             f.writelines(lines)
             
+        print(f"[TraceGen] Generated {len(lines)} reqs (Reads:{scaled_reads}, Writes:{scaled_writes}) at {self.output_path}")
         return self.output_path, len(lines)
