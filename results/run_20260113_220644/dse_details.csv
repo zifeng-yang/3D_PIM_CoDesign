@@ -1,0 +1,7 @@
+Iter,Mode,Cycles,DRAM,SRAM,NoC_Lat,NoC_Pwr
+1,baseline,1376256,294912,16515072,17.0,340.29026880792264
+1,atomic,802816,294912,231211008,17.0,750.3135571540109
+2,baseline,,,,,
+2,atomic,,,,,
+3,baseline,,,,,
+3,atomic,,,,,
