@@ -30,7 +30,7 @@ def debug_run():
             print(f"  {C_GREEN}✔ Generated {len(layer_files)} layers for ResNet18{C_END}")
             
             # [策略] 选取中间某一层进行测试 (例如第5层，或者第0层)
-            target_idx = min(5, len(layer_files)-1)
+            target_idx = 0
             target_prob = layer_files[target_idx]
             print(f"  -> Selecting layer {target_idx} for debug: {os.path.basename(target_prob)}")
             

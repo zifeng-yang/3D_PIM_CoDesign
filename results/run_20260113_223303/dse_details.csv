@@ -1,5 +1,0 @@
-Iter,Mode,Cycles,DRAM,SRAM,NoC_Lat,NoC_Pwr
-1,baseline,0,0,0,0,0
-1,atomic,0,0,0,0,0
-2,baseline,0,0,0,0,0
-2,atomic,0,0,0,0,0

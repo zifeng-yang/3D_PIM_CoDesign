@@ -1,7 +1,0 @@
-{
-    "AREA_LIMIT_MM2": 48.0,
-    "TSV_AREA_OVERHEAD": 0.05,
-    "DRAM_BANK_WIDTH": 256,
-    "TIMEOUT_SEC": 120,
-    "NOTE": "Log-scale SRAM search + Enhanced GP Model"
-}

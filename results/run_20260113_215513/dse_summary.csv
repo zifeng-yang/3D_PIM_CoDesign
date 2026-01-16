@@ -1,2 +1,0 @@
-Iter,Nodes,PE_Dim,SRAM_KB,EDP_Base,Lat_Base,En_Base,EDP_Atom,Lat_Atom,En_Atom,Area_mm2,Runtime_s,Improvement
-1,4,32,16741,1.00e+17,0.00e+00,0.00e+00,1.00e+17,0.00e+00,0.00e+00,91.93,70.20,0.0%

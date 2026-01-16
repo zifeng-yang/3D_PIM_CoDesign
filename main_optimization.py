@@ -41,8 +41,7 @@ def run_dse():
     # 1. 系统初始化与负载准备
     # ---------------------------------------------------------
     logger = DataLogger(CONFIG)
-    start_time_global = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n=== 3D PIM Co-Design Engine (Production Ready) Started ===at {start_time_global} ===")
+    print(f"\n=== 3D PIM Co-Design Engine (Production Ready) Started ===")
     print(f"Results saved to: {logger.get_results_dir()}\n")
     
     # [关键步骤] 准备真实神经网络负载

@@ -1,31 +1,9 @@
 mapper:
   version: 0.4
-  optimization_metrics: [ delay, energy ]
-  live_status: false
-  num_threads: 8
-  timeout: 10000
-  victory_condition: 100
-  algorithm: hybrid
-  diagnostics: false
-
-mapspace:
-  template: uber
-
-constraints:
-  version: 0.4
-  targets:
-    # [Safety] 基础空间约束
-    - target: PIM_Node
-      type: spatial
-
-    # [Core] 强制使用 Node_SRAM
-    - target: Node_SRAM
-      type: dataspace
-      keep: [Inputs, Outputs, Weights]
-      bypass: []
-
-    # Atomic: 强制 L0 寄存器复用
-    - target: RegFile
-      type: temporal
-      factors: [R=1, S=1]
-      permutation: RSPQ
+  optimization-metrics: [ delay, energy ]
+  live-status: false
+  num-threads: 8
+  timeout: 15000
+  victory-condition: 500
+  algorithm: random-pruned
+  max_permutations_per_if_visit: 16

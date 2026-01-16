@@ -1,3 +1,0 @@
-Iter,Mode,Cycles,DRAM_Acc,SRAM_Acc,NoC_Lat,NoC_Pwr
-1,baseline,0,0,0,0,0
-1,atomic,0,0,0,0,0
