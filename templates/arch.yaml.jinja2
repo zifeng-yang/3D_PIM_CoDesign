@@ -1,105 +1,88 @@
 architecture:
   version: 0.4
   nodes:
-    # ============================================================
-    # 1. System Container (Top Level)
-    # ============================================================
-    - !Container
-      name: system
-      attributes:
-        technology: "{{ TECHNOLOGY }}"
-        global_cycle_seconds: {{ GLOBAL_CYCLE_SECONDS }}
+  # ============================================================
+  # 1. System
+  # ============================================================
+  - !Container
+    name: system
+    attributes:
+      technology: "{{ TECHNOLOGY }}"
+      global_cycle_seconds: {{ GLOBAL_CYCLE_SECONDS }}
+  
+  # ============================================================
+  # 2. DRAM
+  # ============================================================
+  - !Component
+    name: SEDRAM
+    class: DRAM
+    attributes:
+      type: "LPDDR4"
+      width: {{ DRAM_WIDTH }}
+      datawidth: {{ DRAM_WIDTH }}
+    constraints:
+      dataspace:
+        keep: [Inputs, Outputs, Weights]
+        bypass: []
 
-    # ============================================================
-    # 2. 3D Stacked DRAM (SEDRAM)
-    # ============================================================
-    - !Component
-      name: SEDRAM
-      class: storage
-      subclass: DRAM
-      attributes:
-        type: "LPDDR4"
-        width: {{ DRAM_WIDTH }}
-        datawidth: {{ DRAM_WIDTH }}
-      # [新增] 在架构层定义约束：作为主存，必须保留所有数据
-      constraints:
-        dataspace:
-          keep: [Inputs, Outputs, Weights]
-          bypass: []
+  # ============================================================
+  # 3. PIM Level
+  # ============================================================
+  - !Container
+    name: PIM_Node
+    spatial: {meshX: {{ NUM_NODES }}}
 
-    # ============================================================
-    # 3. PIM Node Container
-    # ============================================================
-    - !Container
-      name: PIM_Node
-      spatial:
-        meshX: {{ NUM_NODES }}
-        meshY: 1
-      constraints:
-        spatial:
-          permutation: "N C K Y X R S P Q M"
+  - !Component
+    name: Node_SRAM
+    class: smartbuffer_SRAM 
+    attributes:
+      depth: {{ SRAM_DEPTH }}
+      width: {{ SRAM_WIDTH }}
+      datawidth: {{ WORD_BITS }}
+      read_bandwidth: 16
+      write_bandwidth: 16
+    constraints:
+      dataspace:
+        keep: [Inputs, Outputs, Weights]
+        bypass: []
 
-    # ============================================================
-    # 4. Node Components (Shared SRAM & NoC)
-    # ============================================================
-    - !Component
-      name: Node_SRAM
-      class: storage
-      subclass: SRAM
-      attributes:
-        depth: {{ SRAM_DEPTH }}
-        width: {{ SRAM_WIDTH }}
-        datawidth: {{ WORD_BITS }}
-        read_bandwidth: 16
-        write_bandwidth: 16
-      # [新增] 在架构层定义约束：片上全局缓冲，必须保留数据以供复用
-      constraints:
-        dataspace:
-          keep: [Inputs, Outputs, Weights]
-          bypass: []
+  # [已删除 NoC 组件]
 
-    - !Component
-      name: NoC
-      class: SimpleMulticast
-      attributes:
-        datawidth: 32
-        multicast_factor: {{ PE_DIM_X * PE_DIM_Y }}
+  # ============================================================
+  # 4. PE Level
+  # ============================================================
+  - !Container
+    name: PE_column
+    spatial: {meshX: {{ PE_DIM_X }}}
 
-    # ============================================================
-    # 5. PE Array Container
-    # ============================================================
-    - !Container
-      name: PE_Array
-      spatial:
-        meshX: {{ PE_DIM_X }}
-        meshY: {{ PE_DIM_Y }}
-      constraints:
-        spatial:
-          permutation: "C K Y X R S P Q M N"
+  - !Container
+    name: PE_row
+    spatial: {meshY: {{ PE_DIM_Y }}}
 
-    # ============================================================
-    # 6. PE Components (RF & MAC)
-    # ============================================================
-    - !Component
-      name: RegFile
-      class: regfile
-      attributes:
-        depth: 64
-        width: {{ WORD_BITS }}
-        datawidth: {{ WORD_BITS }}
-        meshX: {{ PE_DIM_X }}
-      # [新增] 允许 RF 保留所有数据（具体是否保留由 Mapper 决定，这里只声明能力）
-      # 如果想强制 Weight Stationary，可以写: keep: [Weights], bypass: [Inputs, Outputs]
-      # 这里给最宽松的约束，让 Timeloop 自由探索
-      constraints:
-        dataspace:
-          keep: [Inputs, Outputs, Weights]
+  # ============================================================
+  # 5. Register File (Unified)
+  # [修改] 从 4096 减小到 512，回归理性的硬件设计
+  # 512 深度依然足以通过 ResNet Layer 0 (7x7=49 inputs)，但更有挑战性
+  # ============================================================
+  - !Component
+    name: shared_rf
+    class: smartbuffer_RF
+    attributes:
+      depth: 512   # <--- 修改这里：从 4096 改为 512
+      width: 16
+      datawidth: {{ WORD_BITS }}
+    constraints:
+      dataspace:
+        keep: [Inputs, Outputs, Weights]
+        bypass: []
 
-    - !Component
-      name: MAC
-      class: {{ MAC_CLASS }}
-      attributes:
-        datawidth: {{ WORD_BITS }}
-        multiplier_width: {{ WORD_BITS }}
-        adder_width: {{ WORD_BITS * 2 }}
-        meshX: {{ PE_DIM_X }}
+  # ============================================================
+  # 6. MAC Unit
+  # ============================================================
+  - !Component 
+    name: MAC
+    class: {{ MAC_CLASS }}
+    attributes:
+      multiplier_width: {{ WORD_BITS }}
+      adder_width: {{ WORD_BITS * 2 }}
+      datawidth: {{ WORD_BITS }}

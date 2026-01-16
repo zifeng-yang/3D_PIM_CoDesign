@@ -1,11 +1,9 @@
-# 文件路径: modules/arch_gen.py
-
 import os
 import jinja2
 import yaml
 import logging
 
-# 注册 YAML 标签以防止 PyYAML 报错
+# 注册 YAML 标签
 def dummy_constructor(loader, node):
     if isinstance(node, yaml.ScalarNode):
         return loader.construct_scalar(node)
@@ -35,7 +33,8 @@ class ArchGenerator:
     def generate_config(self, params, filename="arch.yaml"):
         try:
             defaults = {
-                'TECHNOLOGY': '28nm',
+                # [修改] 设置为 28nm
+                'TECHNOLOGY': '28nm', 
                 'GLOBAL_CYCLE_SECONDS': '1e-9',
                 'NUM_NODES': 1,
                 'DRAM_WIDTH': 64,
