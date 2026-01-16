@@ -41,7 +41,7 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
         return output_path
 
     def _generate_mapper(self, template_path, output_path, num_nodes, mode):
-        # [关键修复] 去掉多余的引号，并使用下划线格式
+        # 修正：去掉了多余的引号，使用下划线
         algo = "random_pruned" 
         
         config = {
@@ -86,6 +86,10 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
         agg_noc_lat = 0
         max_area = 0
         valid_layers = 0
+        
+        # 标记是否发生早期退出
+        early_exit = False
+        early_exit_reason = ""
 
         for i, prob_path in enumerate(prob_paths):
             layer_name = os.path.basename(prob_path).replace('.yaml', '')
@@ -118,7 +122,6 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
             except Exception as e:
                 pb.finish()
                 print(f"\n{C_RED}[Error] TimeloopFE Pre-processing Failed for {layer_name}{C_END}")
-                print(f"Details: {e}")
                 return 1e18, 0, 0, 0, {}
 
             # === [直接运行 C++ Backend] ===
@@ -132,13 +135,9 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
                 if is_success and not os.path.exists(stats_file):
                     is_success = False
                     error_msg = f"Mapper finished (RC=0) but NO VALID MAPPING found."
-                    
-                    diag_marker = "Stats:"
-                    if diag_marker in result.stdout:
-                        diag_content = result.stdout.split(diag_marker)[-1]
+                    if "Stats:" in result.stdout:
+                        diag_content = result.stdout.split("Stats:")[-1]
                         error_msg += f"\n{C_YELLOW}>>> Diagnostics:{C_END}\n{diag_content}"
-                    else:
-                        error_msg += f"\nLast Output:\n" + "\n".join(result.stdout.splitlines()[-20:])
                 else:
                     error_msg = result.stderr if not is_success else ""
                     
@@ -151,9 +150,10 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
 
             if not is_success:
                 pb.finish()
-                print(f"\n{C_RED}[Failed] Layer {layer_name} failed.{C_END}")
+                # [早期退出 1] 任何一层失败，直接判定整个架构不可用
+                print(f"\n{C_RED}[Failed] Layer {layer_name} failed. Aborting full model evaluation.{C_END}")
                 print(f"{C_YELLOW}=== Diagnostics / Error Log ==={C_END}")
-                print(error_msg)
+                print(error_msg[:1000]) # 只打印前1000个字符防止刷屏
                 print(f"{C_YELLOW}==============================={C_END}")
                 return 1e18, 0, 0, 0, {}
 
@@ -172,7 +172,22 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
             dram_acc = results.get('dram_reads', 0)
             sram_acc = results.get('sram_reads', 0)
             
+            # 更新最大面积
+            max_area = max(max_area, area)
+
+            # [早期退出 2] 面积检查加速 (Area Pruning)
+            # 只需要在第一层完成后检查。如果第一层面积就超了，后面层面积肯定一样（硬件不变），直接退出
+            if i == 0 and max_area > self.cfg['AREA_LIMIT_MM2']:
+                early_exit = True
+                early_exit_reason = f"Area Violation ({max_area:.2f} > {self.cfg['AREA_LIMIT_MM2']})"
+                # 惩罚性计算：假设剩下所有层都跑了，给予极大的能耗/延迟惩罚
+                # 但为了让优化器知道面积是多少，我们保留 area 值
+                break
+
             # [NoC Sim]
+            noc_lat = 0
+            noc_eng = 0
+            ram_cycles = 0
             if num_nodes > 1:
                 pb.update_step(3, "NoC Sim")
                 trace_file = os.path.join(layer_dir, f"dram_{mode}.trace")
@@ -212,31 +227,46 @@ use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.
             
             agg_energy += (layer_energy + noc_eng + dram_dyn_eng + dram_sta_eng)
             agg_noc_lat += noc_lat
-            max_area = max(max_area, area)
+            
             valid_layers += 1
 
         pb.finish()
         
+        # 结果汇总与惩罚
         total_area = max_area
         penalty_factor = 1.0
-        area_msg = f"{max_area:.1f}"
-        if max_area > self.cfg['AREA_LIMIT_MM2']:
+        area_msg = f"{max_area:.2f}"
+
+        # 如果是因为面积超标提前退出
+        if early_exit:
+            area_msg = f"{C_RED}{max_area:.2f} (Violated){C_END}"
+            # 给予巨大的惩罚，让优化器远离这个参数空间
+            # 惩罚力度与超标程度成正比
+            ratio = (max_area - self.cfg['AREA_LIMIT_MM2']) / self.cfg['AREA_LIMIT_MM2']
+            penalty_factor = 100.0 * (1.0 + ratio) 
+            agg_cycles *= 100 # 假设时间也极长
+            agg_energy *= 100 # 假设能耗也极高
+        elif max_area > self.cfg['AREA_LIMIT_MM2']:
+            # 即使跑完了，如果面积超标也要惩罚
             ratio = (max_area - self.cfg['AREA_LIMIT_MM2']) / self.cfg['AREA_LIMIT_MM2']
             penalty_factor = 1.0 + (ratio * 10.0)
-            area_msg = f"{C_YELLOW}{max_area:.1f}>{self.cfg['AREA_LIMIT_MM2']}{C_END}"
+            area_msg = f"{C_YELLOW}{max_area:.2f}>{self.cfg['AREA_LIMIT_MM2']}{C_END}"
 
         edp_raw = agg_cycles * agg_energy
         edp_final = edp_raw * penalty_factor
 
         t_total = time.time() - t_start
-        fmt_row = "  {:<9} | {:<6} | {:<10} | {:<10} | {:<8} | {:<8} | {:<6} | {:<4}"
+        status_info = f"{valid_layers} Lyrs" if not early_exit else "Early Exit"
+        
+        fmt_row = "  {:<9} | {:<6} | {:<10} | {:<10} | {:<8} | {:<8} | {:<15} | {:<4}"
         log_msg = fmt_row.format(mode.upper(), f"{t_total:.1f}s", f"{agg_cycles:.2e}", 
-                                 f"{valid_layers} Lyrs", f"{agg_energy:.1e}", f"{edp_raw:.1e}", area_msg, '-')
-        sys.stdout.write(f"\r{log_msg}" + " "*30 + "\n")
+                                 status_info, f"{agg_energy:.1e}", f"{edp_final:.1e}", area_msg, '-')
+        sys.stdout.write(f"\r{log_msg}" + " "*10 + "\n")
 
         details = {
             'cycles': agg_cycles, 
             'layers': valid_layers,
-            'avg_noc_lat': agg_noc_lat / max(1, valid_layers)
+            'avg_noc_lat': agg_noc_lat / max(1, valid_layers),
+            'area_violation': early_exit
         }
         return edp_final, agg_cycles, agg_energy, max_area, details
