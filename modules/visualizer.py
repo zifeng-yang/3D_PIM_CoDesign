@@ -2,93 +2,100 @@ import sys
 import time
 import threading
 import itertools
-from datetime import datetime
+import shutil
 
-# === 颜色代码 ===
-C_RED    = "\033[91m"
-C_GREEN  = "\033[92m"
-C_YELLOW = "\033[93m"
-C_BLUE   = "\033[94m"
-C_CYAN   = "\033[96m"
-C_END    = "\033[0m"
+# ==========================================
+# ANSI Color Codes
+# ==========================================
+C_HEADER = '\033[95m'
+C_BLUE = '\033[94m'
+C_CYAN = '\033[96m'
+C_GREEN = '\033[92m'
+C_YELLOW = '\033[93m'
+C_RED = '\033[91m'
+C_PURPLE = '\033[95m'
+C_END = '\033[0m'
+C_BOLD = '\033[1m'
+C_UNDERLINE = '\033[4m'
 
-class DualProgressBar:
-    def __init__(self, mode, total_layers):
-        self.mode = mode.upper()
-        self.total_layers = total_layers
-        
-        # 层级状态 (Global)
-        self.current_layer_idx = 0
-        self.current_layer_name = "Init"
-        
-        # 步骤状态 (Local)
-        self.current_step_idx = 0
-        self.total_steps = 5  # Config, Map, Parse, NoC, Calc
-        self.step_name = "Waiting"
-        
-        # 时间记录
-        self.start_time = time.time()
-        self.layer_start_time = time.time()
-        self.start_str = datetime.now().strftime('%H:%M:%S')
-        
-        # 线程控制
+# 光标控制
+CURSOR_HIDE = '\033[?25l'
+CURSOR_SHOW = '\033[?25h'
+
+# ==========================================
+# Async Spinner (防刷屏版)
+# ==========================================
+class AsyncSpinner:
+    def __init__(self, message="", interval=0.1):
+        self.message = message
+        self.interval = interval
         self.stop_event = threading.Event()
-        self.stream = sys.__stdout__
-        self.thread = threading.Thread(target=self._render)
+        self.thread = None
+        self.lock = threading.Lock()
+        # Braille 字符
+        self.spinner_cycle = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
 
-    def start(self):
-        print(f"{C_BLUE}[System] Task Started at: {self.start_str}{C_END}")
-        self.thread.start()
+    def __enter__(self):
+        # 如果不是终端（如重定向到文件），直接打印并跳过
+        if not sys.stdout.isatty():
+            print(self.message)
+            return self
 
-    def update_layer(self, idx, name):
-        """更新外层进度（哪一层）"""
-        self.current_layer_idx = idx
-        self.current_layer_name = name
-        self.layer_start_time = time.time()
-        self.current_step_idx = 0
-        self.step_name = "Init"
-
-    def update_step(self, idx, name):
-        """更新内层进度（哪一步）"""
-        self.current_step_idx = idx
-        self.step_name = name
-
-    def finish(self):
-        self.stop_event.set()
-        self.thread.join()
-        self.stream.write('\n') # 换行防止覆盖最后一行结果
-        self.stream.flush()
-
-    def _render(self):
-        spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
-        bar_len = 8 # 进度条长度
+        sys.stdout.write(CURSOR_HIDE)
+        sys.stdout.flush()
         
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.daemon = True 
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.thread:
+            self.stop_event.set()
+            self.thread.join()
+            
+            # 恢复光标并清理行
+            sys.stdout.write(f"\r{CURSOR_SHOW}")
+            # 用静态消息覆盖，清除 spinner 字符
+            # 这里我们需要重新计算长度以清除残留
+            cols = shutil.get_terminal_size((80, 20)).columns
+            clean_msg = self._truncate(self.message, cols - 1)
+            sys.stdout.write(f"\r{clean_msg} \033[K") # \033[K 清除行尾
+            sys.stdout.flush()
+
+    def _truncate(self, text, max_len):
+        """简单粗暴的截断，忽略颜色代码长度的精细计算（为了性能和稳定性）"""
+        # 注意：这里按字符截断，ANSI颜色代码可能会占用长度导致实际显示更短，
+        # 但这比换行刷屏要好。为了安全，我们预留更多空间。
+        if len(text) > max_len:
+            return text[:max_len-3] + "..."
+        return text
+
+    def _spin(self):
         while not self.stop_event.is_set():
-            now = time.time()
-            total_elapsed = now - self.start_time
-            layer_elapsed = now - self.layer_start_time
+            spin_char = next(self.spinner_cycle)
             
-            # 1. 总进度 (Layer N/Total)
-            l_pct = min(1.0, self.current_layer_idx / max(1, self.total_layers))
-            l_fill = int(bar_len * l_pct)
-            l_bar = '█' * l_fill + '░' * (bar_len - l_fill)
+            # 获取当前终端宽度
+            cols = shutil.get_terminal_size((80, 20)).columns
+            # 预留 5 个字符给 spinner 和边距
+            avail_len = max(10, cols - 5)
             
-            # 2. 当前层步骤进度 (Step N/5)
-            s_pct = min(1.0, self.current_step_idx / max(1, self.total_steps))
-            s_fill = int(bar_len * s_pct)
-            s_bar = '▓' * s_fill + '▒' * (bar_len - s_fill)
+            # 构造行内容
+            display_msg = self._truncate(self.message, avail_len)
+            line = f"\r{display_msg} {C_GREEN}{spin_char}{C_END}\033[K"
             
-            spin = next(spinner)
+            with self.lock:
+                sys.stdout.write(line)
+                sys.stdout.flush()
             
-            # 格式设计：
-            # [MODE] Lyr: 2/20 [██░░] ResNet_L2 | Stp: 3/5 [▓▓▒▒] NoC Sim | ⠋ 3.2s (Tot:15s)
-            status = (
-                f"\r{C_BLUE}[{self.mode}]{C_END} "
-                f"Lyr: {self.current_layer_idx}/{self.total_layers} {C_GREEN}[{l_bar}]{C_END} {self.current_layer_name[:12]:<12} | "
-                f"Stp: {self.current_step_idx}/{self.total_steps} {C_YELLOW}[{s_bar}]{C_END} {self.step_name:<10} | "
-                f"{spin} {layer_elapsed:.1f}s (Tot:{total_elapsed:.0f}s)   "
-            )
-            
-            self.stream.write(status)
-            self.stream.flush()
-            time.sleep(0.1)
+            time.sleep(self.interval)
+
+    def update_message(self, new_message):
+        self.message = new_message
+
+# ==========================================
+# Legacy Helper
+# ==========================================
+class DualProgressBar:
+    def __init__(self, task_name, total_steps): pass

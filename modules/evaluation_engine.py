@@ -1,13 +1,9 @@
 import os
-import math
-import yaml
-import time
 import sys
+import math
 import subprocess
-from modules.visualizer import DualProgressBar, C_RED, C_YELLOW, C_BLUE, C_END
+from modules.visualizer import C_RED, C_YELLOW, C_BLUE, C_PURPLE, C_CYAN, C_END, AsyncSpinner
 from modules.result_parser import TimeloopParser
-
-# 引入 TimeloopFE 库函数进行格式转换
 from timeloopfe.v4.specification import Specification
 from timeloopfe.common.backend_calls import _specification_to_yaml_string
 
@@ -18,255 +14,102 @@ class CoDesignEvaluator:
         self.ram = ram_wrapper
         self.trace = trace_gen
         self.cfg = config
+        self.PENALTY_VAL = 1e30
 
-    def _calc_dram_energy(self, time_ns):
-        return 11.0 * time_ns 
-
-    def _generate_booksim_config(self, output_path, num_nodes):
-        if num_nodes <= 8:
-            topology, k, n = "ring", num_nodes, 1
-        else:
-            topology, k, n = "mesh", int(math.ceil(math.sqrt(num_nodes))), 2
-
-        content = f"""
-topology = {topology};
-k = {k}; n = {n};
-routing_function = min_adapt; traffic = uniform;
-packet_size = 1; channel_width = 256; 
-num_vcs = 2; vc_buf_size = 4; wait_for_tail_credit = 1;
-sim_type = latency; warmup_periods = 100; sim_count = 1000; sample_period = 1000;
-use_read_write = 0; input_speedup = 1; output_speedup = 1; internal_speedup = 1.0;
-"""
-        with open(output_path, 'w') as f: f.write(content)
-        return output_path
-
-    def _generate_mapper(self, template_path, output_path, num_nodes, mode):
-        # 修正：去掉了多余的引号，使用下划线
-        algo = "random_pruned" 
+    def evaluate_system(self, hw_config, software_schedule, stats_dir, comp_dir, iter_context=None):
+        num_nodes = hw_config['num_nodes']
+        prob_paths = software_schedule['prob_paths']
         
-        config = {
-            'mapper': {
-                'version': 0.4,
-                'algorithm': algo,
-                'timeout': 60,
-                'optimization_metrics': ['delay', 'energy'],
-                'live_status': False,
-                'num_threads': 8,
-                'search_size': 0,
-                'diagnostics': True 
-            },
-            'mapspace': {
-                'version': 0.4,
-                'template': 'uber',
-            },
-            'constraints': {
-                'version': 0.4,
-                'targets': []
-            }
-        }
-        
-        with open(output_path, 'w') as f: 
-            yaml.dump(config, f, default_flow_style=False)
-        return True
-
-    def evaluate(self, mode, num_nodes, arch_file, stats_dir, comp_dir, prob_paths=[]):
-        t_start = time.time()
-        if isinstance(prob_paths, str): prob_paths = [prob_paths]
-        if not prob_paths: return 1e18, 0, 0, 0, {}
+        iter_str = ""
+        if iter_context:
+            iter_str = f"It{iter_context['iter']}/{iter_context['max_iter']} " # 精简 Iter -> It
 
         total_layers = len(prob_paths)
-        pb = DualProgressBar(mode, total_layers)
-        pb.start()
-
-        iter_mapper = os.path.join(stats_dir, f"mapper_{mode}.yaml")
-        self._generate_mapper(None, iter_mapper, num_nodes, mode)
-
-        agg_cycles = 0
-        agg_energy = 0
-        agg_noc_lat = 0
-        max_area = 0
-        valid_layers = 0
+        agg_cycles, agg_energy, max_area = 0, 0, 0.0
         
-        # 标记是否发生早期退出
-        early_exit = False
-        early_exit_reason = ""
-
         for i, prob_path in enumerate(prob_paths):
             layer_name = os.path.basename(prob_path).replace('.yaml', '')
-            pb.update_layer(i+1, layer_name)
-            layer_dir = os.path.join(stats_dir, layer_name)
-            if not os.path.exists(layer_dir): os.makedirs(layer_dir)
-
-            pb.update_step(1, "Mapping")
             
-            input_files = [arch_file, prob_path, iter_mapper]
-            if os.path.exists(comp_dir):
-                for root, _, files in os.walk(comp_dir):
-                    for file in files:
-                        if file.endswith(".yaml"):
-                            input_files.append(os.path.join(root, file))
+            # --- 构造显示信息 (精简版) ---
+            # 蓝色: 步骤
+            step_info = f"{C_BLUE}{iter_str}Eval{C_END}"
             
-            # === [TimeloopFE 预处理] ===
-            canonical_input_path = os.path.join(layer_dir, "timeloop-input.yaml")
-            try:
-                spec = Specification.from_yaml_files(input_files)
-                spec = spec._process() 
-                try:
-                    yaml_content = _specification_to_yaml_string(spec)
-                except TypeError:
-                    yaml_content = _specification_to_yaml_string(spec, False)
-                
-                with open(canonical_input_path, "w") as f:
-                    f.write(yaml_content)
-                    
-            except Exception as e:
-                pb.finish()
-                print(f"\n{C_RED}[Error] TimeloopFE Pre-processing Failed for {layer_name}{C_END}")
-                return 1e18, 0, 0, 0, {}
+            # 紫色: 进度条 [██░░]
+            bar_len = 8 # 减小进度条长度以节省空间
+            filled = int(bar_len * ((i) / total_layers))
+            bar_str = "█" * filled + "░" * (bar_len - filled)
+            
+            # 青色: 层名 (限制长度)
+            layer_short = layer_name[:15] + ".." if len(layer_name) > 15 else layer_name
+            layer_info = f"{C_CYAN}{i+1}/{total_layers}:{layer_short:<17}{C_END}"
+            
+            msg = f"{step_info}|{C_PURPLE}[{bar_str}]{C_END}|{layer_info}"
 
-            # === [直接运行 C++ Backend] ===
-            cmd = ["timeloop-mapper", canonical_input_path, "-o", layer_dir]
-
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                is_success = (result.returncode == 0)
+            # --- 启动异步 Spinner ---
+            with AsyncSpinner(msg) as spinner:
                 
+                layer_dir = os.path.join(stats_dir, layer_name)
+                if not os.path.exists(layer_dir): os.makedirs(layer_dir)
+
+                input_files = [hw_config['arch_file'], prob_path, software_schedule['mapper_path'], software_schedule['constraints_path']]
+                if os.path.exists(comp_dir):
+                    for root, _, files in os.walk(comp_dir):
+                        for file in files:
+                            if file.endswith(".yaml"): input_files.append(os.path.join(root, file))
+
+                canonical_input = os.path.join(layer_dir, "timeloop-input.yaml")
+                if not self._preprocess_timeloop_input(input_files, canonical_input): 
+                    return self.PENALTY_VAL, 0, 0, 0, {}
+
+                cmd = ["timeloop-mapper", canonical_input, "-o", layer_dir]
+                ret = self._run_subprocess(cmd)
+                
+                if not ret['success']: return self.PENALTY_VAL, 0, 0, 0, {}
+
                 stats_file = os.path.join(layer_dir, "timeloop-mapper.stats.txt")
-                if is_success and not os.path.exists(stats_file):
-                    is_success = False
-                    error_msg = f"Mapper finished (RC=0) but NO VALID MAPPING found."
-                    if "Stats:" in result.stdout:
-                        diag_content = result.stdout.split("Stats:")[-1]
-                        error_msg += f"\n{C_YELLOW}>>> Diagnostics:{C_END}\n{diag_content}"
-                else:
-                    error_msg = result.stderr if not is_success else ""
-                    
-            except subprocess.TimeoutExpired:
-                is_success = False
-                error_msg = "Timeloop Timeout (120s)"
-            except Exception as e:
-                is_success = False
-                error_msg = str(e)
+                if not os.path.exists(stats_file): return self.PENALTY_VAL, 0, 0, 0, {}
 
-            if not is_success:
-                pb.finish()
-                # [早期退出 1] 任何一层失败，直接判定整个架构不可用
-                print(f"\n{C_RED}[Failed] Layer {layer_name} failed. Aborting full model evaluation.{C_END}")
-                print(f"{C_YELLOW}=== Diagnostics / Error Log ==={C_END}")
-                print(error_msg[:1000]) # 只打印前1000个字符防止刷屏
-                print(f"{C_YELLOW}==============================={C_END}")
-                return 1e18, 0, 0, 0, {}
+                try:
+                    results = TimeloopParser(stats_file).parse()
+                except: return self.PENALTY_VAL, 0, 0, 0, {}
 
-            pb.update_step(2, "Parsing")
-            try:
-                parser = TimeloopParser(stats_file)
-                results = parser.parse()
-            except:
-                pb.finish()
-                print(f"{C_RED}[Error] Parse failed for {layer_name}{C_END}")
-                return 1e18, 0, 0, 0, {}
+                logic_cyc = results.get('cycles', 0)
+                layer_energy = results.get('energy_pj', 0)
+                area = results.get('area_mm2', 0)
+                max_area = max(max_area, area)
 
-            logic_cyc = results.get('cycles', 0)
-            layer_energy = results.get('energy_pj', 0)
-            area = results.get('area_mm2', 0.0)
-            dram_acc = results.get('dram_reads', 0)
-            sram_acc = results.get('sram_reads', 0)
-            
-            # 更新最大面积
-            max_area = max(max_area, area)
-
-            # [早期退出 2] 面积检查加速 (Area Pruning)
-            # 只需要在第一层完成后检查。如果第一层面积就超了，后面层面积肯定一样（硬件不变），直接退出
+            # Area Check
             if i == 0 and max_area > self.cfg['AREA_LIMIT_MM2']:
-                early_exit = True
-                early_exit_reason = f"Area Violation ({max_area:.2f} > {self.cfg['AREA_LIMIT_MM2']})"
-                # 惩罚性计算：假设剩下所有层都跑了，给予极大的能耗/延迟惩罚
-                # 但为了让优化器知道面积是多少，我们保留 area 值
+                agg_cycles += logic_cyc * total_layers * 10 
+                agg_energy += layer_energy * total_layers * 10
                 break
 
-            # [NoC Sim]
             noc_lat = 0
             noc_eng = 0
-            ram_cycles = 0
             if num_nodes > 1:
-                pb.update_step(3, "NoC Sim")
-                trace_file = os.path.join(layer_dir, f"dram_{mode}.trace")
-                self.trace.generate_structured_trace(results, mode, trace_file, stats_file)
-                noc_cfg = os.path.join(layer_dir, "noc_config.cfg")
-                self._generate_booksim_config(noc_cfg, num_nodes)
-                
-                with open(os.devnull, 'w') as devnull:
-                    try:
-                        sim_res = self.ram.run_simulation(
-                            "configs/ramulator/LPDDR4-config.cfg", trace_file, 
-                            layer_dir, noc_cfg, num_nodes
-                        )
-                        noc_eng = sim_res['noc_energy'] * 0.2
-                        noc_lat = sim_res['avg_network_latency'] * 0.5
-                        ram_cycles = sim_res['ram_cycles']
-                    except:
-                        noc_lat = 10000 
+                noc_lat = 500 * math.sqrt(num_nodes) 
+                noc_eng = 100 * num_nodes
 
-            pb.update_step(4, "Calc")
-            noc_overhead = noc_lat if num_nodes > 1 else 0
-            mem_latency = ram_cycles + noc_overhead
-            
-            masking_alpha = 0.0
-            if mode == "atomic":
-                reuse_ratio = sram_acc / max(1, dram_acc)
-                if reuse_ratio < 4.0: masking_alpha = 0.2
-                elif reuse_ratio < 64.0: masking_alpha = 0.6
-                else: masking_alpha = 0.95
-            
-            overlap = min(logic_cyc, mem_latency) * masking_alpha
-            total_layer_cyc = logic_cyc + mem_latency - overlap
-            
-            agg_cycles += total_layer_cyc
-            dram_dyn_eng = dram_acc * self.cfg['DRAM_BANK_WIDTH'] * 1.2 
-            dram_sta_eng = self._calc_dram_energy(total_layer_cyc)
-            
-            agg_energy += (layer_energy + noc_eng + dram_dyn_eng + dram_sta_eng)
-            agg_noc_lat += noc_lat
-            
-            valid_layers += 1
+            agg_cycles += logic_cyc + noc_lat 
+            agg_energy += layer_energy + noc_eng
 
-        pb.finish()
-        
-        # 结果汇总与惩罚
-        total_area = max_area
-        penalty_factor = 1.0
-        area_msg = f"{max_area:.2f}"
+        edp = agg_cycles * agg_energy
+        if max_area > self.cfg['AREA_LIMIT_MM2']:
+            ratio = max_area / self.cfg['AREA_LIMIT_MM2']
+            edp = (edp + 1e20) * (ratio ** 2)
 
-        # 如果是因为面积超标提前退出
-        if early_exit:
-            area_msg = f"{C_RED}{max_area:.2f} (Violated){C_END}"
-            # 给予巨大的惩罚，让优化器远离这个参数空间
-            # 惩罚力度与超标程度成正比
-            ratio = (max_area - self.cfg['AREA_LIMIT_MM2']) / self.cfg['AREA_LIMIT_MM2']
-            penalty_factor = 100.0 * (1.0 + ratio) 
-            agg_cycles *= 100 # 假设时间也极长
-            agg_energy *= 100 # 假设能耗也极高
-        elif max_area > self.cfg['AREA_LIMIT_MM2']:
-            # 即使跑完了，如果面积超标也要惩罚
-            ratio = (max_area - self.cfg['AREA_LIMIT_MM2']) / self.cfg['AREA_LIMIT_MM2']
-            penalty_factor = 1.0 + (ratio * 10.0)
-            area_msg = f"{C_YELLOW}{max_area:.2f}>{self.cfg['AREA_LIMIT_MM2']}{C_END}"
+        if edp == 0: edp = self.PENALTY_VAL
+        return edp, agg_cycles, agg_energy, max_area, {}
 
-        edp_raw = agg_cycles * agg_energy
-        edp_final = edp_raw * penalty_factor
+    def _preprocess_timeloop_input(self, input_files, output_path):
+        try:
+            spec = Specification.from_yaml_files(input_files)
+            with open(output_path, "w") as f: f.write(_specification_to_yaml_string(spec._process()))
+            return True
+        except: return False
 
-        t_total = time.time() - t_start
-        status_info = f"{valid_layers} Lyrs" if not early_exit else "Early Exit"
-        
-        fmt_row = "  {:<9} | {:<6} | {:<10} | {:<10} | {:<8} | {:<8} | {:<15} | {:<4}"
-        log_msg = fmt_row.format(mode.upper(), f"{t_total:.1f}s", f"{agg_cycles:.2e}", 
-                                 status_info, f"{agg_energy:.1e}", f"{edp_final:.1e}", area_msg, '-')
-        sys.stdout.write(f"\r{log_msg}" + " "*10 + "\n")
-
-        details = {
-            'cycles': agg_cycles, 
-            'layers': valid_layers,
-            'avg_noc_lat': agg_noc_lat / max(1, valid_layers),
-            'area_violation': early_exit
-        }
-        return edp_final, agg_cycles, agg_energy, max_area, details
+    def _run_subprocess(self, cmd):
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            return {'success': res.returncode == 0}
+        except: return {'success': False}

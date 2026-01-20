@@ -20,10 +20,7 @@ architecture:
       type: "LPDDR4"
       width: {{ DRAM_WIDTH }}
       datawidth: {{ DRAM_WIDTH }}
-    constraints:
-      dataspace:
-        keep: [Inputs, Outputs, Weights]
-        bypass: []
+    # [修复] 删除硬编码约束，允许 Mapper 决定 (通常 DRAM 都是 keep，但为了整洁移出)
 
   # ============================================================
   # 3. PIM Level
@@ -41,12 +38,8 @@ architecture:
       datawidth: {{ WORD_BITS }}
       read_bandwidth: 16
       write_bandwidth: 16
-    constraints:
-      dataspace:
-        keep: [Inputs, Outputs, Weights]
-        bypass: []
-
-  # [已删除 NoC 组件]
+    # [关键修复] 删除这里的 constraints 块
+    # 冲突曾发生在这里：arch 说 keep=[all], optimizer 说 bypass=[Inputs] -> 冲突
 
   # ============================================================
   # 4. PE Level
@@ -61,20 +54,15 @@ architecture:
 
   # ============================================================
   # 5. Register File (Unified)
-  # [修改] 从 4096 减小到 512，回归理性的硬件设计
-  # 512 深度依然足以通过 ResNet Layer 0 (7x7=49 inputs)，但更有挑战性
   # ============================================================
   - !Component
     name: shared_rf
     class: smartbuffer_RF
     attributes:
-      depth: 512   # <--- 修改这里：从 4096 改为 512
+      depth: 512   
       width: 16
       datawidth: {{ WORD_BITS }}
-    constraints:
-      dataspace:
-        keep: [Inputs, Outputs, Weights]
-        bypass: []
+    # [关键修复] 删除这里的 constraints 块，防止 shared_rf 也报同样的错
 
   # ============================================================
   # 6. MAC Unit
