@@ -1,0 +1,53 @@
+constraints:
+  targets:
+  - factors:
+    - M=16
+    - C=1
+    - P=1
+    - Q=1
+    - R=1
+    - S=1
+    - N=1
+    permutation:
+    - M
+    - C
+    - P
+    - Q
+    - R
+    - S
+    - N
+    target: PE_column
+    type: spatial
+  - factors:
+    - P=16
+    - M=1
+    - C=1
+    - Q=1
+    - R=1
+    - S=1
+    - N=1
+    permutation:
+    - P
+    - M
+    - C
+    - Q
+    - R
+    - S
+    - N
+    target: PE_row
+    type: spatial
+  - bypass:
+    - Inputs
+    - Outputs
+    keep:
+    - Weights
+    target: Node_SRAM
+    type: dataspace
+  - bypass:
+    - Inputs
+    - Outputs
+    - Weights
+    keep: []
+    target: shared_rf
+    type: dataspace
+  version: 0.4

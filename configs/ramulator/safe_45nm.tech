@@ -1,0 +1,6 @@
+
+        Vdd = 1.0; R = 1.0; H_SRAM = 1; W_SRAM = 1;
+        Cg_pwr = 1e-15; Cd_pwr = 1e-15; Cgdl = 1e-15; Cg = 1e-15; Cd = 1e-15;
+        Cw_gnd = 1e-15; Cw_cpl = 1e-15;
+        IoffSRAM = 1e-9; IoffP = 1e-9; IoffN = 1e-9;
+        

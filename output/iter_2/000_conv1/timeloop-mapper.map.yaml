@@ -1,0 +1,70 @@
+mapping:
+  - target: shared_rf
+    type: datatype
+    keep:
+      []
+    bypass:
+      - Weights
+      - Inputs
+      - Outputs
+  - target: inter_PE_row_spatial
+    type: datatype
+    keep:
+      []
+    bypass:
+      - Weights
+      - Inputs
+      - Outputs
+  - target: inter_PE_column_spatial
+    type: datatype
+    keep:
+      []
+    bypass:
+      - Weights
+      - Inputs
+      - Outputs
+  - target: Node_SRAM
+    type: datatype
+    keep:
+      - Weights
+    bypass:
+      - Inputs
+      - Outputs
+  - target: SEDRAM
+    type: datatype
+    keep:
+      - Weights
+      - Inputs
+      - Outputs
+    bypass:
+      []
+  - target: shared_rf
+    type: temporal
+    factors: C3 M4 R7 S7 N1 P6 Q112
+    permutation: CMRSPQN
+  - target: inter_PE_row_spatial
+    type: spatial
+    factors: C1 M1 R1 S1 N1 P19 Q1
+    permutation: PCMRSNQ
+    split: 0
+  - target: inter_PE_row_spatial
+    type: temporal
+    factors: C1 M1 R1 S1 N1 P1 Q1
+    permutation: CMRSNPQ
+  - target: inter_PE_column_spatial
+    type: spatial
+    factors: C1 M16 R1 S1 N1 P1 Q1
+    permutation: MCRSNPQ
+    split: 1
+  - target: inter_PE_column_spatial
+    type: temporal
+    factors: C1 M1 R1 S1 N1 P1 Q1
+    permutation: CMRSNPQ
+  - target: Node_SRAM
+    type: temporal
+    factors: C1 M1 R1 S1 N1 P1 Q1
+    permutation: CMRSNPQ
+  - target: SEDRAM
+    type: temporal
+    factors: C1 M1 R1 S1 N1 P1 Q1
+    permutation: CMRSNPQ

@@ -1,0 +1,69 @@
+ERT_summary:
+    version: '0.4'
+    table_summary:
+      - name: system_top_level.SEDRAM[1..1]
+        actions:
+          - name: leak
+            energy: 0.0
+          - name: write
+            energy: 512.0
+          - name: read
+            energy: 512.0
+          - name: update
+            energy: 512.0
+        primitive_estimation(s):
+          - name: system_top_level.SEDRAM[1..1]
+            estimator: CactiDRAM
+      - name: system_top_level.Node_SRAM[1..4]
+        actions:
+          - name: write
+            energy: 16.35
+          - name: read
+            energy: 20.8606
+          - name: leak
+            energy: 0.0205487
+          - name: update
+            energy: 16.35
+        primitive_estimation(s):
+          - name: storage
+            estimator: CactiSRAM
+          - name: address_generators[0]
+            estimator: Neurosim Plug-In
+          - name: address_generators[1]
+            estimator: Neurosim Plug-In
+          - name: address_generators[0..1]
+            estimator: Neurosim Plug-In
+      - name: system_top_level.shared_rf[1..1024]
+        actions:
+          - name: write
+            energy: 3.51948
+          - name: read
+            energy: 3.58637
+          - name: leak
+            energy: 0.00298832
+          - name: update
+            energy: 3.51948
+        primitive_estimation(s):
+          - name: storage.storage[1..32]
+            estimator: Library
+          - name: storage.comparator[1..512]
+            estimator: Library
+          - name: address_generators[0]
+            estimator: Neurosim Plug-In
+          - name: address_generators[1]
+            estimator: Neurosim Plug-In
+          - name: storage.storage[1..16384]
+            estimator: Library
+          - name: address_generators[0..1]
+            estimator: Neurosim Plug-In
+      - name: system_top_level.MAC[1..1024]
+        actions:
+          - name: compute
+            energy: 0.195106
+          - name: leak
+            energy: 0.00222979
+        primitive_estimation(s):
+          - name: intadder
+            estimator: Library
+          - name: intmultiplier
+            estimator: Library

@@ -1,0 +1,21 @@
+
+        Vdd = 1.0;
+        R = 0.0;
+        # Capacitance parameters (in Farads)
+        Cg_pwr = 0.0;
+        Cd_pwr = 0.0;
+        Cgdl = 0.0;
+        Cg = 0.0;
+        Cd = 0.0;
+        Cw_gnd = 0.0;
+        Cw_cpl = 0.0;
+        # Area parameters
+        H_INVD2 = 0; W_INVD2 = 0;
+        H_DFQD1 = 0; W_DFQD1 = 0;
+        H_ND2D1 = 0; W_ND2D1 = 0;
+        H_SRAM = 0;  W_SRAM = 0;
+        # Leakage parameters
+        IoffSRAM = 0;
+        IoffP = 0;
+        IoffN = 0;
+        

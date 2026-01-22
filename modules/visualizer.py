@@ -93,6 +93,15 @@ class AsyncSpinner:
 
     def update_message(self, new_message):
         self.message = new_message
+        
+    def stop(self):
+        """手动停止旋转，用于在with块内部发生错误需要打印日志时"""
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join()
+        # 清理当前行
+        sys.stdout.write("\r" + " " * 80 + "\r")
+        sys.stdout.flush()
 
 # ==========================================
 # Legacy Helper

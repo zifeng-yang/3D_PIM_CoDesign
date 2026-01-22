@@ -1,0 +1,23 @@
+SEDRAM [ Weights:589824 (589824) Inputs:65536 (65536) Outputs:50176 (50176) ] 
+-----------------------------------------------------------------------------
+| for C in [0:256)
+|   for S in [0:3)
+|     for Q in [0:2)
+
+Node_SRAM [ Weights:768 (768) ] 
+-------------------------------
+|       for R in [0:3)
+|         for Q in [0:7)
+|           for M in [0:13)
+
+inter_PE_column_spatial [ ] 
+---------------------------
+|             for M in [0:20,16) (Spatial-X)
+
+inter_PE_row_spatial [ ] 
+------------------------
+|               for P in [0:14) (Spatial-Y)
+
+shared_rf [ ] 
+-------------
+|                 << Compute >>
